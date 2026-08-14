@@ -323,6 +323,31 @@ int socket_add_fds(fd_set *rdfs, bool connected)
     return maxfd;
 }
 
+bool socket_map_input_char(char *character)
+{
+    /* If INLCR is set, a received NL character shall be translated into a CR character */
+    if (*character == '\n' && option.map_i_nl_cr)
+    {
+        *character = '\r';
+    }
+    else if (*character == '\r')
+    {
+        /* If IGNCR is set, a received CR character shall be ignored (not read). */
+        if (option.map_ign_cr)
+        {
+            return false;
+        }
+
+        /* If IGNCR is not set and ICRNL is set, a received CR character shall be translated into an NL character. */
+        if (option.map_i_cr_nl)
+        {
+            *character = '\n';
+        }
+    }
+
+    return true;
+}
+
 bool socket_handle_input(fd_set *rdfs, char *output_char)
 {
     if (!option.socket)
@@ -379,24 +404,10 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
                 continue;
             }
 
-            /* If INLCR is set, a received NL character shall be translated into a CR character */
-            if (*output_char == '\n' && option.map_i_nl_cr)
+            if (!socket_map_input_char(output_char))
             {
-                *output_char = '\r';
-            }
-            else if (*output_char == '\r')
-            {
-                /* If IGNCR is set, a received CR character shall be ignored (not read). */
-                if (option.map_ign_cr)
-                {
-                    return false;
-                }
-
-                /* If IGNCR is not set and ICRNL is set, a received CR character shall be translated into an NL character. */
-                if (option.map_i_cr_nl)
-                {
-                    *output_char = '\n';
-                }
+                /* Character dropped by IGNCR - nothing to forward */
+                return false;
             }
             return true;
         }

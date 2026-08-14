@@ -2913,6 +2913,17 @@ int device_connect(void)
 
                     input_char = input_buffer[i];
 
+                    /* A socket carries no termios input flags, so the INLCR,
+                     * IGNCR and ICRNL mappings the kernel applies to a tty
+                     * device are applied here instead */
+                    if (device_mode == DEVICE_MODE_SOCKET)
+                    {
+                        if (!socket_map_input_char(&input_char))
+                        {
+                            continue;
+                        }
+                    }
+
                     /* Handle timestamps */
                     switch (option.output_mode)
                     {

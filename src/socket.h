@@ -29,3 +29,9 @@ void socket_configure(void);
 void socket_write(char input_char);
 int socket_add_fds(fd_set *fds, bool connected);
 bool socket_handle_input(fd_set *fds, char *output_char);
+
+// Apply the INLCR/IGNCR/ICRNL input mappings in software, for data arriving
+// over a socket where no termios input flags exist to do it. Returns false
+// when the character is to be dropped (IGNCR), true when *character holds the
+// mapped character.
+bool socket_map_input_char(char *character);
