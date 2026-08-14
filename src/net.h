@@ -22,5 +22,22 @@
 #pragma once
 
 #include <stdbool.h>
+#include <sys/socket.h>
+
+// A socket address resolved once from a target string. Held so that the
+// reconnect loop can retry without resolving again.
+typedef struct
+{
+    int family;
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
+} net_address_t;
 
 bool net_target_is_socket(const char *target);
+
+// Parse and resolve a 'unix:', 'inet:' or 'inet6:' target and cache the
+// result. Reports the offending part and exits on a malformed target.
+void net_resolve(const char *target);
+
+// The address cached by net_resolve(), or NULL if it has not run
+const net_address_t *net_address_get(void);

@@ -2344,6 +2344,11 @@ void tty_search(void)
                 // Socket target detected -> do not treat target as a tty device
                 device_mode = DEVICE_MODE_SOCKET;
 
+                // Parse and resolve up front so a malformed target is reported
+                // here, and so the reconnect loop can retry against the cached
+                // address without resolving again
+                net_resolve(device_name);
+
                 tio_error_printf("Socket mode detected but not yet implemented (%s)", device_name);
                 exit(EXIT_FAILURE);
             }
