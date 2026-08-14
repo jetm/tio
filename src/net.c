@@ -27,7 +27,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <unistd.h>
 
+#include "error.h"
 #include "net.h"
 #include "print.h"
 
@@ -258,4 +260,53 @@ void net_resolve(const char *target)
 const net_address_t *net_address_get(void)
 {
     return resolved ? &resolved_address : NULL;
+}
+
+int net_connect(void)
+{
+    const net_address_t *address = net_address_get();
+    int fd;
+
+    if (address == NULL)
+    {
+        tio_error_printf("No socket address resolved");
+        exit(EXIT_FAILURE);
+    }
+
+    fd = socket(address->family, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+        tio_error_printf_silent("Could not create socket (%s)", strerror(errno));
+        return -1;
+    }
+
+    // Platforms without MSG_NOSIGNAL suppress SIGPIPE per socket instead,
+    // matching what the socket server does on send
+#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
+    int optval = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval)))
+    {
+        tio_error_printf_silent("Could not set socket options (%s)", strerror(errno));
+        close(fd);
+        return -1;
+    }
+#endif
+
+    if (connect(fd, (const struct sockaddr *) &address->addr, address->addrlen) < 0)
+    {
+        tio_error_printf_silent("Could not connect socket (%s)", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+ssize_t net_send(int fd, const void *buffer, size_t count)
+{
+#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
+    return send(fd, buffer, count, 0);
+#else
+    return send(fd, buffer, count, MSG_NOSIGNAL);
+#endif
 }

@@ -41,3 +41,10 @@ void net_resolve(const char *target);
 
 // The address cached by net_resolve(), or NULL if it has not run
 const net_address_t *net_address_get(void);
+
+// Create and connect a socket against the address cached by net_resolve().
+// Returns the connected file descriptor, or -1 on failure.
+int net_connect(void);
+
+// Write to a connected socket without raising SIGPIPE when the peer is gone
+ssize_t net_send(int fd, const void *buffer, size_t count);
