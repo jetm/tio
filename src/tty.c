@@ -167,6 +167,7 @@ bool interactive_mode = true;
 char key_hit = 0xff;
 
 const char* device_name = NULL;
+device_mode_t device_mode = DEVICE_MODE_TTY;
 GList *device_list = NULL;
 static struct termios tio, tio_old, stdout_new, stdout_old, stdin_new, stdin_old;
 static unsigned long rx_total = 0, tx_total = 0;
@@ -237,7 +238,7 @@ inline static unsigned char char_to_nibble(char c)
 #define FLUSH_POLL_MS       100
 #define FLUSH_MAX_STALLED   100
 
-void tty_sync(int fd)
+void device_sync(int fd)
 {
     char *read_ptr = tty_buffer;
     size_t remaining = tty_buffer_count;
@@ -284,7 +285,7 @@ void tty_sync(int fd)
     tty_buffer_count = 0;
 }
 
-ssize_t tty_write(int fd, const void *buffer, size_t count)
+ssize_t device_write(int fd, const void *buffer, size_t count)
 {
     ssize_t retval = 0, bytes_written = 0;
     size_t i;
@@ -341,7 +342,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Force write of tty buffer if too full
         if ((tty_buffer_count + count) > BUFSIZ)
         {
-            tty_sync(fd);
+            device_sync(fd);
         }
 
         // Copy bytes to tty write buffer
@@ -489,7 +490,7 @@ static void handle_hex_prompt(char c)
         unsigned char hex_value = char_to_nibble(hex_chars[0]) << 4 | (char_to_nibble(hex_chars[1]) & 0x0F);
         hex_char_index = 0;
 
-        ssize_t status = tty_write(device_fd, &hex_value, 1);
+        ssize_t status = device_write(device_fd, &hex_value, 1);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -2365,7 +2366,7 @@ void tty_search(void)
     }
 }
 
-void tty_wait_for_device(void)
+void device_wait(void)
 {
     fd_set rdfs;
     int    status;
@@ -2434,7 +2435,7 @@ void tty_wait_for_device(void)
 #elif defined(__APPLE__)
                 if (errno == EBADF)
                 {
-                    break; // tty_disconnect() will be naturally triggered by atexit()
+                    break; // device_disconnect() will be naturally triggered by atexit()
                 }
 #else
                 tio_error_printf("select() failed (%s)", strerror(errno));
@@ -2467,7 +2468,7 @@ void tty_wait_for_device(void)
     }
 }
 
-void tty_disconnect(void)
+void device_disconnect(void)
 {
     if (connected)
     {
@@ -2493,11 +2494,11 @@ void tty_restore(void)
 
     if (connected)
     {
-        tty_disconnect();
+        device_disconnect();
     }
 }
 
-void forward_to_tty(int fd, char output_char)
+void forward_to_device(int fd, char output_char)
 {
     int status;
 
@@ -2522,7 +2523,7 @@ void forward_to_tty(int fd, char output_char)
 
         optional_local_echo(crlf[0]);
         optional_local_echo(crlf[1]);
-        status = tty_write(fd, crlf, 2);
+        status = device_write(fd, crlf, 2);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -2553,7 +2554,7 @@ void forward_to_tty(int fd, char output_char)
                     }
                     else
                     {
-                        status = tty_write(fd, &output_char, 1);
+                        status = device_write(fd, &output_char, 1);
                     }
 
                     if (status < 0)
@@ -2573,7 +2574,7 @@ void forward_to_tty(int fd, char output_char)
                 }
                 else if (option.input_mode == INPUT_MODE_NORMAL)
                 {
-                    status = tty_write(device_fd, &output_char, 1);
+                    status = device_write(device_fd, &output_char, 1);
                     if (status < 0)
                     {
                         tio_warning_printf("Could not write to tty device");
@@ -2592,7 +2593,7 @@ void forward_to_tty(int fd, char output_char)
     }
 }
 
-int tty_connect(void)
+int device_connect(void)
 {
     fd_set rdfs;           /* Read file descriptor set */
     int    maxfd;          /* Maximum file descriptor used */
@@ -2978,7 +2979,7 @@ int tty_connect(void)
                 else if (bytes_read == 0)
                 {
                     /* Reached EOF (when piping to stdin, never reached) */
-                    tty_sync(device_fd);
+                    device_sync(device_fd);
                     exit(EXIT_SUCCESS);
                 }
 
@@ -3022,7 +3023,7 @@ int tty_connect(void)
 
                                         // Write current line to tty device
                                         char *rl_line = readline_get();
-                                        tty_write(device_fd, rl_line, strlen(rl_line));
+                                        device_write(device_fd, rl_line, strlen(rl_line));
                                     }
                                     else
                                     {
@@ -3039,11 +3040,11 @@ int tty_connect(void)
 
                     if (forward)
                     {
-                        forward_to_tty(device_fd, output_char);
+                        forward_to_device(device_fd, output_char);
                     }
                 }
 
-                tty_sync(device_fd);
+                device_sync(device_fd);
             }
             /* Unconditional, because socket_handle_input tests its own descriptors and
              * returns at once when the socket option is off or nothing is ready. A
@@ -3058,10 +3059,10 @@ int tty_connect(void)
 
                 if (forward)
                 {
-                    forward_to_tty(device_fd, output_char);
+                    forward_to_device(device_fd, output_char);
                 }
 
-                tty_sync(device_fd);
+                device_sync(device_fd);
             }
         }
         else if (status == -1)
@@ -3075,7 +3076,7 @@ int tty_connect(void)
 #elif defined(__APPLE__)
             if (errno == EBADF)
             {
-                break; // tty_disconnect() will be naturally triggered by atexit()
+                break; // device_disconnect() will be naturally triggered by atexit()
             }
 #else
             tio_error_printf("select() failed (%s)", strerror(errno));
@@ -3095,7 +3096,7 @@ error_setspeed:
 error_tcsetattr:
 error_tcgetattr:
 error_read:
-    tty_disconnect();
+    device_disconnect();
 error_open:
     return TIO_ERROR;
 }

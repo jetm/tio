@@ -53,6 +53,12 @@ typedef enum
     AUTO_CONNECT_END,
 } auto_connect_t;
 
+typedef enum
+{
+    DEVICE_MODE_TTY,
+    DEVICE_MODE_SOCKET,
+} device_mode_t;
+
 typedef struct
 {
     char *tid;
@@ -70,14 +76,15 @@ typedef struct
 } tty_line_config_t;
 
 extern const char *device_name;
+extern device_mode_t device_mode;
 extern bool interactive_mode;
 
 void stdout_configure(void);
 void stdin_configure(void);
 void tty_configure(void);
 void tty_reconfigure(void);
-int tty_connect(void);
-void tty_wait_for_device(void);
+int device_connect(void);
+void device_wait(void);
 void list_serial_devices(void);
 void tty_input_thread_create(void);
 void tty_input_thread_wait_ready(void);
