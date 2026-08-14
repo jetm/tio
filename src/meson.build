@@ -19,6 +19,7 @@ tio_sources = [
   'configfile.c',
   'signals.c',
   'socket.c',
+  'net.c',
   'setspeed.c',
   'rs485.c',
   'timestamp.c',

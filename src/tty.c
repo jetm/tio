@@ -76,6 +76,7 @@
 #include "xymodem.h"
 #include "fs.h"
 #include "readline.h"
+#include "net.h"
 
 /* tty device listing configuration */
 
@@ -2336,6 +2337,15 @@ void tty_search(void)
             {
                 // Fallback to use the target direcly
                 device_name = option.target;
+            }
+
+            if (net_target_is_socket(device_name))
+            {
+                // Socket target detected -> do not treat target as a tty device
+                device_mode = DEVICE_MODE_SOCKET;
+
+                tio_error_printf("Socket mode detected but not yet implemented (%s)", device_name);
+                exit(EXIT_FAILURE);
             }
 
             if (strlen(device_name) == TOPOLOGY_ID_SIZE)
