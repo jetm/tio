@@ -449,6 +449,10 @@ void *tty_stdin_input_thread(void *arg)
                             exit(EXIT_SUCCESS);
                             break;
                         case KEY_SHIFT_F:
+                            if (device_serial_only("Flushing data I/O buffers"))
+                            {
+                                break;
+                            }
                             tio_printf("Flushed data I/O buffers")
                             tcflush(device_fd, TCIOFLUSH);
                             break;
@@ -524,6 +528,20 @@ static void handle_hex_prompt(char c)
             tx_total++;
         }
     }
+}
+
+bool device_serial_only(const char *operation)
+{
+    if (device_mode == DEVICE_MODE_TTY)
+    {
+        return false;
+    }
+
+    /* Say so rather than doing nothing: a user pressing a familiar key is
+     * better served by an explanation than by silence */
+    tio_warning_printf("%s is not available in socket mode", operation);
+
+    return true;
 }
 
 static const char *tty_line_name(int mask)
@@ -948,6 +966,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_SHIFT_L:
+                if (device_serial_only("Showing line states"))
+                {
+                    break;
+                }
                 if (ioctl(device_fd, TIOCMGET, &state) < 0)
                 {
                     tio_warning_printf("Could not get line state (%s)", strerror(errno));
@@ -982,6 +1004,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_G:
+                if (device_serial_only("Toggling a serial line"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which serial line number to toggle:");
                 tio_printf("(0) DTR");
                 tio_printf("(1) RTS");
@@ -995,6 +1021,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_P:
+                if (device_serial_only("Pulsing a serial line"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which serial line number to pulse:");
                 tio_printf("(0) DTR");
                 tio_printf("(1) RTS");
@@ -1008,6 +1038,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_B:
+                if (device_serial_only("Sending break"))
+                {
+                    break;
+                }
                 tcsendbreak(device_fd, 0);
                 break;
 
@@ -1181,6 +1215,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_X:
+                if (device_serial_only("Xmodem transfer"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which X modem protocol to use:");
                 tio_printf(" (0) XMODEM-1K send");
                 tio_printf(" (1) XMODEM-CRC send");
@@ -1190,6 +1228,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_Y:
+                if (device_serial_only("Ymodem transfer"))
+                {
+                    break;
+                }
                 tio_printf("Send file with YMODEM");
                 tio_printf_raw("Enter file name: ");
                 if (tio_readln()) {
@@ -2628,6 +2670,10 @@ void forward_to_device(int fd, char output_char)
 
                     if ((output_char == 0) && (option.map_o_nulbrk))
                     {
+                        if (device_serial_only("ONULBRK"))
+                        {
+                            return;
+                        }
                         status = tcsendbreak(fd, 0);
                     }
                     else

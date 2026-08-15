@@ -89,5 +89,10 @@ void list_serial_devices(void);
 void tty_input_thread_create(void);
 void tty_input_thread_wait_ready(void);
 void tty_line_set(int fd, tty_line_config_t line_config[]);
+
+// Report an operation that only a serial line can carry out, when the session
+// is connected to a socket. Returns true when the caller must not proceed.
+bool device_serial_only(const char *operation);
+
 void tty_search(void);
 GList *tty_search_for_serial_devices(void);

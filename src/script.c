@@ -206,6 +206,11 @@ static int line_set(lua_State *L)
         line_config[5].reserved = true;
     }
 
+    if (device_serial_only("tio.line_set()"))
+    {
+        return 0;
+    }
+
     tty_line_set(device_fd, line_config);
 
     return 0;
@@ -219,6 +224,11 @@ static int api_send(lua_State *L)
     int ret;
 
     if (file == NULL)
+    {
+        return 0;
+    }
+
+    if (device_serial_only("tio.send()"))
     {
         return 0;
     }
@@ -267,8 +277,11 @@ static int api_write(lua_State *L)
     if (len > 0)
         return luaL_error(L, "partial write");
 
-    fsync(device_fd);  // flush these characters now
-    tcdrain(device_fd); //ensure we flushed characters to our device
+    if (device_mode == DEVICE_MODE_TTY)
+    {
+        fsync(device_fd);  // flush these characters now
+        tcdrain(device_fd); //ensure we flushed characters to our device
+    }
 
     lua_getglobal(L, "tio");
 
