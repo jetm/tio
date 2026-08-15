@@ -42,6 +42,10 @@ void net_resolve(const char *target);
 // The address cached by net_resolve(), or NULL if it has not run
 const net_address_t *net_address_get(void);
 
+// Filesystem path of the resolved endpoint, or NULL when it has none. Only a
+// 'unix:' target has one, which is what makes it testable while waiting.
+const char *net_socket_path(void);
+
 // Create and connect a socket against the address cached by net_resolve().
 // Returns the connected file descriptor, or -1 on failure.
 int net_connect(void);

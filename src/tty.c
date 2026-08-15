@@ -2485,26 +2485,39 @@ void device_wait(void)
             }
         }
 
+        /* The device file to test for, and the access mode that says it is
+         * usable. A unix endpoint only has to exist; a tty has to be readable */
+        const char *probe_path = device_name;
+        int probe_mode = R_OK;
+
         if (device_mode == DEVICE_MODE_SOCKET)
         {
-            /* A socket endpoint has no device file to test - the connection
-             * attempt itself is the availability test */
             static bool socket_first_attempt = true;
 
-            if (!interactive_mode && !socket_first_attempt)
-            {
-                /* Pace retries as the tty path below does. The interactive
-                 * path is already paced by the select() timeout above. */
-                sleep(1);
-            }
-            socket_first_attempt = false;
+            probe_path = net_socket_path();
+            probe_mode = F_OK;
 
-            last_errno = 0;
-            return;
+            if (probe_path == NULL)
+            {
+                /* A host and port have no file to test, so the connection
+                 * attempt itself is the availability test. Probing the
+                 * filesystem here would never pass and would wait forever. */
+                if (!interactive_mode && !socket_first_attempt)
+                {
+                    /* Pace retries as the device path below does. The
+                     * interactive path is already paced by the select()
+                     * timeout above. */
+                    sleep(1);
+                }
+                socket_first_attempt = false;
+
+                last_errno = 0;
+                return;
+            }
         }
 
         /* Test for accessible device file */
-        status = access(device_name, R_OK);
+        status = access(probe_path, probe_mode);
         if (status == 0)
         {
             last_errno = 0;
@@ -2512,8 +2525,8 @@ void device_wait(void)
         }
         else if (last_errno != errno)
         {
-            tio_warning_printf("Could not open %s (%s)", device_name, strerror(errno));
-            tio_printf("Waiting for tty device..");
+            tio_warning_printf("Could not open %s (%s)", probe_path, strerror(errno));
+            tio_printf("Waiting for device..");
             last_errno = errno;
         }
 
@@ -2521,7 +2534,7 @@ void device_wait(void)
         {
             /* In non-interactive mode we do not need to handle input key
              * commands so we simply sleep 1 second between checking for
-             * presence of tty device */
+             * presence of the device */
             sleep(1);
         }
     }
@@ -2874,8 +2887,9 @@ int device_connect(void)
                 ssize_t bytes_read = read(device_fd, input_buffer, BUFSIZ);
                 if (bytes_read <= 0)
                 {
-                    /* Error reading - device is likely unplugged */
-                    tio_error_printf_silent("Could not read from tty device");
+                    /* Error reading - a tty is likely unplugged, a socket peer
+                     * has likely closed. Either way the session reconnects. */
+                    tio_error_printf_silent("Could not read from device");
                     goto error_read;
                 }
 

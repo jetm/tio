@@ -262,6 +262,20 @@ const net_address_t *net_address_get(void)
     return resolved ? &resolved_address : NULL;
 }
 
+const char *net_socket_path(void)
+{
+    const struct sockaddr_un *sockaddr_unix;
+
+    if (!resolved || (resolved_address.family != AF_UNIX))
+    {
+        return NULL;
+    }
+
+    sockaddr_unix = (const struct sockaddr_un *) &resolved_address.addr;
+
+    return sockaddr_unix->sun_path;
+}
+
 int net_connect(void)
 {
     const net_address_t *address = net_address_get();
