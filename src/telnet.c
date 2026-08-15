@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "telnet.h"
 #include "net.h"
@@ -47,7 +48,21 @@
 #define COM_SET_DATASIZE 2
 #define COM_SET_PARITY   3
 #define COM_SET_STOPSIZE 4
+#define COM_SET_CONTROL  5
 #define SERVER_OFFSET    100
+
+/* RFC 2217 SET-CONTROL values. A break is a pair rather than a duration: the
+ * line is held and then released, so the length is the client's to decide. */
+#define CONTROL_BREAK_ON  4
+#define CONTROL_BREAK_OFF 5
+#define CONTROL_DTR_ON    6
+#define CONTROL_DTR_OFF   7
+#define CONTROL_RTS_ON    8
+#define CONTROL_RTS_OFF   9
+
+/* Matches what tcsendbreak sends for a zero duration, so a break behaves the
+ * same whether the port is local or at the far end of a socket */
+#define BREAK_DURATION_US 250000
 
 /* RFC 2217 parity values */
 #define PARITY_VALUE_NONE  1
@@ -269,6 +284,54 @@ void telnet_send_port_settings(int fd)
     requested_stopbits = option.stopbits;
     values[0] = (unsigned char) option.stopbits;
     send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+}
+
+bool telnet_serial_control(void)
+{
+    return local_enabled[OPT_COM_PORT];
+}
+
+bool telnet_send_break(int fd)
+{
+    unsigned char value;
+
+    if (!telnet_serial_control())
+    {
+        return false;
+    }
+
+    value = CONTROL_BREAK_ON;
+    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+
+    usleep(BREAK_DURATION_US);
+
+    value = CONTROL_BREAK_OFF;
+    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+
+    return true;
+}
+
+bool telnet_set_line(int fd, telnet_line_t line, bool assert_line)
+{
+    unsigned char value;
+
+    if (!telnet_serial_control())
+    {
+        return false;
+    }
+
+    if (line == TELNET_LINE_DTR)
+    {
+        value = assert_line ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
+    }
+    else
+    {
+        value = assert_line ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
+    }
+
+    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+
+    return true;
 }
 
 static void report_setting(const char *name, long applied, long wanted)

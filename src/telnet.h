@@ -39,6 +39,26 @@ bool telnet_engaged(void);
 // the same buffer. Returns how many data bytes are left.
 size_t telnet_filter_input(int fd, char *buffer, size_t count);
 
+// The modem control lines a client can drive. The remaining lines on a serial
+// port are inputs, which no protocol makes writable.
+typedef enum
+{
+    TELNET_LINE_DTR,
+    TELNET_LINE_RTS,
+} telnet_line_t;
+
+// True when the peer took the serial-port option, which is what decides
+// whether an operation needing a serial line can be carried to it at all
+bool telnet_serial_control(void);
+
+// Ask the remote port for a break. Returns false when the peer never took the
+// serial-port option, leaving the caller to report the operation unavailable.
+bool telnet_send_break(int fd);
+
+// Drive a modem control line on the remote port. Returns false on a peer that
+// did not take the serial-port option.
+bool telnet_set_line(int fd, telnet_line_t line, bool assert_line);
+
 // Carry the serial settings to the remote port. Does nothing when the peer
 // declined the serial-port option, which leaves the session a plain byte
 // stream rather than a failure.

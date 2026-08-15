@@ -623,9 +623,61 @@ void tty_line_set(int fd, tty_line_config_t line_config[])
     }
 }
 
+/* A socket carries no line state to read back, so what was last asked for is
+ * tracked here instead. Both lines start asserted because that is what a
+ * server does when it opens the port. */
+static int socket_line_state = TIOCM_DTR | TIOCM_RTS;
+
+static void tty_line_toggle_socket(int fd, int mask)
+{
+    telnet_line_t control_line;
+    bool assert_line;
+
+    if (mask == TIOCM_DTR)
+    {
+        control_line = TELNET_LINE_DTR;
+    }
+    else if (mask == TIOCM_RTS)
+    {
+        control_line = TELNET_LINE_RTS;
+    }
+    else
+    {
+        /* The rest are inputs; no protocol makes them writable */
+        tio_warning_printf("%s is an input line and cannot be driven over a socket",
+                           tty_line_name(mask));
+        return;
+    }
+
+    assert_line = ((socket_line_state & mask) == 0);
+
+    if (!telnet_set_line(fd, control_line, assert_line))
+    {
+        device_serial_only("Toggling a serial line");
+        return;
+    }
+
+    if (assert_line)
+    {
+        socket_line_state |= mask;
+    }
+    else
+    {
+        socket_line_state &= ~mask;
+    }
+
+    tio_printf("Setting %s to %s", tty_line_name(mask), assert_line ? "LOW" : "HIGH");
+}
+
 void tty_line_toggle(int fd, int mask)
 {
     int state;
+
+    if (device_mode == DEVICE_MODE_SOCKET)
+    {
+        tty_line_toggle_socket(fd, mask);
+        return;
+    }
 
     if (ioctl(fd, TIOCMGET, &state) < 0)
     {
@@ -1012,8 +1064,9 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_G:
-                if (device_serial_only("Toggling a serial line"))
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control())
                 {
+                    device_serial_only("Toggling a serial line");
                     break;
                 }
                 tio_printf("Please enter which serial line number to toggle:");
@@ -1029,8 +1082,9 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_P:
-                if (device_serial_only("Pulsing a serial line"))
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control())
                 {
+                    device_serial_only("Pulsing a serial line");
                     break;
                 }
                 tio_printf("Please enter which serial line number to pulse:");
@@ -1046,8 +1100,12 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_B:
-                if (device_serial_only("Sending break"))
+                if (device_mode == DEVICE_MODE_SOCKET)
                 {
+                    if (!telnet_send_break(device_fd))
+                    {
+                        device_serial_only("Sending break");
+                    }
                     break;
                 }
                 tcsendbreak(device_fd, 0);
@@ -2689,11 +2747,19 @@ void forward_to_device(int fd, char output_char)
 
                     if ((output_char == 0) && (option.map_o_nulbrk))
                     {
-                        if (device_serial_only("ONULBRK"))
+                        if (device_mode == DEVICE_MODE_SOCKET)
                         {
-                            return;
+                            if (!telnet_send_break(fd))
+                            {
+                                device_serial_only("ONULBRK");
+                                return;
+                            }
+                            status = 0;
                         }
-                        status = tcsendbreak(fd, 0);
+                        else
+                        {
+                            status = tcsendbreak(fd, 0);
+                        }
                     }
                     else
                     {
