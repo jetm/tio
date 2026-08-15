@@ -78,6 +78,15 @@ struct option_t
     bool prefix_enabled;
     bool mute;
     bool socket_rfc2217;
+
+    // Whether each serial setting was given on the command line for this
+    // invocation. A socket target needs the difference: configuration file
+    // values describe how to open a local device, and pushing them onto a
+    // remote port reconfigures a line the user never asked to touch.
+    bool baudrate_set;
+    bool databits_set;
+    bool stopbits_set;
+    bool parity_set;
     bool rs485;
     uint32_t rs485_config_flags;
     int32_t rs485_delay_rts_before_send;

@@ -222,24 +222,41 @@ void telnet_send_port_settings(telnet_t *telnet, int fd)
 
     telnet->settings_sent = true;
 
-    telnet->requested_baudrate = option.baudrate;
-    values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
-    values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
-    values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
-    values[3] = (unsigned char) ((unsigned int) option.baudrate);
-    send_subneg(fd, COM_SET_BAUDRATE, values, 4);
+    /* Only what was actually asked for. A remote port is somebody's console
+     * and reconfiguring one nobody asked to change is not harmless: applying a
+     * rate to a live line can glitch it into a break, and a break on a Linux
+     * console arms SysRq, whose next character is the command. Attaching to a
+     * console must not be able to reboot the far end. */
+    if (option.baudrate_set)
+    {
+        telnet->requested_baudrate = option.baudrate;
+        values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
+        values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
+        values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
+        values[3] = (unsigned char) ((unsigned int) option.baudrate);
+        send_subneg(fd, COM_SET_BAUDRATE, values, 4);
+    }
 
-    telnet->requested_databits = option.databits;
-    values[0] = (unsigned char) option.databits;
-    send_subneg(fd, COM_SET_DATASIZE, values, 1);
+    if (option.databits_set)
+    {
+        telnet->requested_databits = option.databits;
+        values[0] = (unsigned char) option.databits;
+        send_subneg(fd, COM_SET_DATASIZE, values, 1);
+    }
 
-    telnet->requested_parity = parity_value(option.parity);
-    values[0] = (unsigned char) telnet->requested_parity;
-    send_subneg(fd, COM_SET_PARITY, values, 1);
+    if (option.parity_set)
+    {
+        telnet->requested_parity = parity_value(option.parity);
+        values[0] = (unsigned char) telnet->requested_parity;
+        send_subneg(fd, COM_SET_PARITY, values, 1);
+    }
 
-    telnet->requested_stopbits = option.stopbits;
-    values[0] = (unsigned char) option.stopbits;
-    send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+    if (option.stopbits_set)
+    {
+        telnet->requested_stopbits = option.stopbits;
+        values[0] = (unsigned char) option.stopbits;
+        send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+    }
 }
 
 bool telnet_serial_control(const telnet_t *telnet)
