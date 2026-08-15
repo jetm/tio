@@ -6,13 +6,17 @@ tio \- a serial device I/O tool
 .SH "SYNOPSIS"
 .PP
 .B tio
-.RI "[" <options> "] " "<tty-device|profile|tid>"
+.RI "[" <options> "] " "<tty-device|socket|profile|tid>"
 
 .SH "DESCRIPTION"
 .PP
 \fBtio\fR is a serial device tool which features a straightforward command-line
 and configuration file interface to easily connect to serial TTY devices for
 basic I/O operations.
+
+It also connects to a socket endpoint in place of a serial device, which
+attaches a session to a serial port shared by another \fBtio\fR running with
+\fB\-\-socket\fR, or to a serial-over-network server. See \fBSOCKET TARGETS\fR.
 
 .SH "OPTIONS"
 
@@ -383,6 +387,51 @@ Display program version.
 .BR \-h ", " \-\-help
 
 Display help.
+
+.SH "SOCKET TARGETS"
+.PP
+A target prefixed \fBunix:\fR, \fBinet:\fR, or \fBinet6:\fR is connected to as
+a socket client instead of being opened as a serial device. This is the client
+side of \fB\-\-socket\fR: it attaches to a serial port already shared by
+another \fBtio\fR, or to any server presenting a serial port over a socket.
+
+.RS
+.TP 24n
+.IP "\fBunix:<filename>"
+Unix Domain Socket (file)
+.IP "\fBinet:<host>[:<port>]"
+Internet Socket (network)
+.IP "\fBinet6:<host>\fR or \fBinet6:[<host>]:<port>"
+Internet IPv6 Socket (network)
+.P
+If no port is provided, or the port is 0, default port 3333 is used. A port
+outside the range 0-65535 is rejected.
+.P
+An IPv6 address contains colons of its own, so a port is only recognized when
+the address is bracketed. \fBinet6:::1\fR is the address ::1 on the default
+port; \fBinet6:[::1]:4242\fR is the address ::1 on port 4242.
+.P
+Note that the field differs from the one \fB\-\-socket\fR takes. A server binds
+a port and so writes \fBinet:4242\fR, while a client must reach a host and so
+writes \fBinet:localhost:4242\fR.
+.RE
+
+.PP
+The session behaves as it does on a serial device, with the exception of the
+operations a socket cannot carry out. Sending a break, toggling or pulsing
+modem lines, showing line states, flushing the I/O buffers, and x/y-modem
+transfers all report that they are unavailable rather than acting. The
+\fBONULBRK\fR output mapping and the \fBtio.line_set()\fR and \fBtio.send()\fR
+script functions report the same.
+
+.PP
+Serial port settings such as baud rate, data bits, and parity have no effect on
+a socket target, since the connection carries bytes rather than driving a line.
+
+.PP
+A socket target reconnects on disconnect under the usual rules, so a session
+survives the far end restarting. Use \fB\-\-no\-reconnect\fR to exit instead.
+
 .SH "KEY COMMANDS"
 .PP
 .TP 16n

@@ -79,6 +79,8 @@ when used in combination with [tmux](https://tmux.github.io).
  * Redirect I/O of shell command to serial device
  * Redirect I/O to UNIX socket or IPv4/v6 network socket
    * Useful for scripting or TTY sharing
+ * Connect to a UNIX socket or IPv4/v6 network socket as a client
+   * Attach to a TTY shared by another tio, or to a serial-over-network server
  * Pipe input and/or output
  * Bash completion on options, serial device names, and profile names
  * Configurable tio message text color
@@ -104,9 +106,9 @@ For more usage details please see the man page documentation
 The command-line interface is straightforward as reflected in the output from
 ```tio --help```:
 ```
-Usage: tio [<options>] <tty-device|profile|tid>
+Usage: tio [<options>] <tty-device|socket|profile|tid>
 
-Connect to TTY device directly or via configuration profile or topology ID.
+Connect to TTY device directly or via socket, configuration profile, or topology ID.
 
 Options:
   -b, --baudrate <bps>                   Baud rate (default: 115200)
@@ -274,6 +276,16 @@ $ tio --output-mode hex16 /dev/ttyUSB0
 Redirect I/O to IPv4 network socket on port 4242:
 ```
 $ tio --socket inet:4242 /dev/ttyUSB0
+```
+
+Connect to that shared device from another machine:
+```
+$ tio inet:hostname:4242
+```
+
+Connect to a UNIX socket shared by another tio:
+```
+$ tio unix:/tmp/tio.sock
 ```
 
 Map NL to CR-NL on input from device and DEL to BS on output to device:
