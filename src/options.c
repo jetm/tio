@@ -50,6 +50,7 @@ enum opt_t
     OPT_ALERT,
     OPT_COMPLETE_PROFILES,
     OPT_MUTE,
+    OPT_SOCKET_RFC2217,
     OPT_SCRIPT,
     OPT_SCRIPT_FILE,
     OPT_SCRIPT_RUN,
@@ -95,6 +96,7 @@ struct option_t option =
     .prefix_key = 't',
     .prefix_enabled = true,
     .mute = false,
+    .socket_rfc2217 = false,
     .rs485 = false,
     .rs485_config_flags = 0,
     .rs485_delay_rts_before_send = -1,
@@ -163,6 +165,7 @@ void option_print_help(char *argv[])
     printf("  -m, --map <flags>                      Map characters\n");
     printf("  -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)\n");
     printf("  -S, --socket <socket>                  Redirect I/O to socket\n");
+    printf("      --socket-rfc2217                   Offer RFC 2217 to socket clients\n");
     printf("      --rs-485                           Enable RS-485 mode\n");
     printf("      --rs-485-config <config>           Set RS-485 configuration\n");
     printf("      --alert bell|blink|none            Alert on connect/disconnect (default: none)\n");
@@ -923,6 +926,7 @@ void options_parse(int argc, char *argv[])
             {"rs-485-config",        required_argument, 0, OPT_RS485_CONFIG        },
             {"alert",                required_argument, 0, OPT_ALERT               },
             {"mute",                 no_argument,       0, OPT_MUTE                },
+            {"socket-rfc2217",       no_argument,       0, OPT_SOCKET_RFC2217      },
             {"script",               required_argument, 0, OPT_SCRIPT              },
             {"script-file",          required_argument, 0, OPT_SCRIPT_FILE         },
             {"script-run",           required_argument, 0, OPT_SCRIPT_RUN          },
@@ -1082,6 +1086,10 @@ void options_parse(int argc, char *argv[])
 
             case OPT_ALERT:
                 option_parse_alert(optarg, &option.alert);
+                break;
+
+            case OPT_SOCKET_RFC2217:
+                option.socket_rfc2217 = true;
                 break;
 
             case OPT_MUTE:

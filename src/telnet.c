@@ -26,6 +26,7 @@
 #include "telnet.h"
 #include "net.h"
 #include "options.h"
+#include "tty.h"
 #include "print.h"
 
 /* RFC 854 */
@@ -80,10 +81,11 @@ telnet_t *telnet_client(void)
     return &client_context;
 }
 
-void telnet_reset(telnet_t *telnet)
+void telnet_reset(telnet_t *telnet, telnet_role_t role)
 {
     memset(telnet, 0, sizeof(*telnet));
     telnet->state = TELNET_STATE_DATA;
+    telnet->role = role;
 }
 
 bool telnet_engaged(const telnet_t *telnet)
@@ -383,7 +385,118 @@ static void handle_com_port_response(const telnet_t *telnet)
     }
 }
 
-static void handle_subneg(const telnet_t *telnet)
+/* The reverse of parity_value(): what the client asked for, in the terms the
+ * device is configured in */
+static parity_t parity_from_value(unsigned char value)
+{
+    switch (value)
+    {
+        case PARITY_VALUE_ODD:
+            return PARITY_ODD;
+        case PARITY_VALUE_EVEN:
+            return PARITY_EVEN;
+        case PARITY_VALUE_MARK:
+            return PARITY_MARK;
+        case PARITY_VALUE_SPACE:
+            return PARITY_SPACE;
+        case PARITY_VALUE_NONE:
+        default:
+            return PARITY_NONE;
+    }
+}
+
+/* A server answers every request with the setting that ended up in effect,
+ * which is the requested one only when the device could take it. Answering
+ * with the request instead would tell the client a device it cannot see is
+ * configured in a way it is not. */
+static void handle_com_port_request(const telnet_t *telnet, int fd)
+{
+    unsigned char command;
+    unsigned char values[4];
+    int applied;
+
+    if (telnet->subneg_length < 2)
+    {
+        return;
+    }
+
+    command = telnet->subneg[1];
+
+    switch (command)
+    {
+        case COM_SET_BAUDRATE:
+            if (telnet->subneg_length >= 6)
+            {
+                int asked = (int) (((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
+                                   ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5]);
+
+                applied = tty_apply_baudrate(asked);
+                values[0] = (unsigned char) ((unsigned int) applied >> 24);
+                values[1] = (unsigned char) ((unsigned int) applied >> 16);
+                values[2] = (unsigned char) ((unsigned int) applied >> 8);
+                values[3] = (unsigned char) applied;
+                send_subneg(fd, COM_SET_BAUDRATE + SERVER_OFFSET, values, 4);
+            }
+            break;
+
+        case COM_SET_DATASIZE:
+            if (telnet->subneg_length >= 3)
+            {
+                values[0] = (unsigned char) tty_apply_databits(telnet->subneg[2]);
+                send_subneg(fd, COM_SET_DATASIZE + SERVER_OFFSET, values, 1);
+            }
+            break;
+
+        case COM_SET_PARITY:
+            if (telnet->subneg_length >= 3)
+            {
+                parity_t got = tty_apply_parity(parity_from_value(telnet->subneg[2]));
+                values[0] = parity_value(got);
+                send_subneg(fd, COM_SET_PARITY + SERVER_OFFSET, values, 1);
+            }
+            break;
+
+        case COM_SET_STOPSIZE:
+            if (telnet->subneg_length >= 3)
+            {
+                values[0] = (unsigned char) tty_apply_stopbits(telnet->subneg[2]);
+                send_subneg(fd, COM_SET_STOPSIZE + SERVER_OFFSET, values, 1);
+            }
+            break;
+
+        case COM_SET_CONTROL:
+            if (telnet->subneg_length >= 3)
+            {
+                switch (telnet->subneg[2])
+                {
+                    case CONTROL_BREAK_ON:
+                        tty_apply_break();
+                        break;
+
+                    case CONTROL_DTR_ON:
+                    case CONTROL_DTR_OFF:
+                        tty_apply_dtr(telnet->subneg[2] == CONTROL_DTR_ON);
+                        break;
+
+                    case CONTROL_RTS_ON:
+                    case CONTROL_RTS_OFF:
+                        tty_apply_rts(telnet->subneg[2] == CONTROL_RTS_ON);
+                        break;
+
+                    default:
+                        /* Break-off needs nothing, since the break already
+                         * released the line, and flow control is not offered */
+                        break;
+                }
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void handle_subneg(const telnet_t *telnet, int fd)
 {
     if (telnet->subneg_overflow)
     {
@@ -392,10 +505,39 @@ static void handle_subneg(const telnet_t *telnet)
         return;
     }
 
-    if ((telnet->subneg_length >= 1) && (telnet->subneg[0] == OPT_COM_PORT))
+    if ((telnet->subneg_length < 1) || (telnet->subneg[0] != OPT_COM_PORT))
+    {
+        return;
+    }
+
+    if (telnet->role == TELNET_ROLE_SERVER)
+    {
+        handle_com_port_request(telnet, fd);
+    }
+    else
     {
         handle_com_port_response(telnet);
     }
+}
+
+void telnet_server_offer(telnet_t *telnet, int fd)
+{
+    /* Speaking first is the commitment. Waiting for the client to send a
+     * command marker before escaping would leave every device byte equal to
+     * one going out bare in the meantime, and a client that only ever reads
+     * never closes that window at all. */
+    telnet->engaged = true;
+    /* Binary in both directions so the high bit of a serial byte survives,
+     * and the serial-port option so a client can configure the device */
+    send_command(fd, WILL, OPT_BINARY);
+    telnet->local_enabled[OPT_BINARY] = true;
+    telnet->local_answered[OPT_BINARY] = true;
+
+    send_command(fd, DO, OPT_BINARY);
+    telnet->remote_enabled[OPT_BINARY] = true;
+    telnet->remote_answered[OPT_BINARY] = true;
+
+    send_command(fd, DO, OPT_COM_PORT);
 }
 
 static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
@@ -535,7 +677,7 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
             case TELNET_STATE_SUBNEG_COMMAND:
                 if (byte == SE)
                 {
-                    handle_subneg(telnet);
+                    handle_subneg(telnet, fd);
                     telnet->state = TELNET_STATE_DATA;
                 }
                 else

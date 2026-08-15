@@ -94,5 +94,21 @@ void tty_line_set(int fd, tty_line_config_t line_config[]);
 // is connected to a socket. Returns true when the caller must not proceed.
 bool device_serial_only(const char *operation);
 
+// Apply a setting a socket client asked for to the device being served, and
+// return what is in effect afterwards. That differs from the request when the
+// device could not take it, which is what the caller has to answer with.
+int tty_apply_baudrate(int baudrate);
+int tty_apply_databits(int databits);
+int tty_apply_stopbits(int stopbits);
+parity_t tty_apply_parity(parity_t parity);
+
+// Send a break on the device being served, at a client's request
+void tty_apply_break(void);
+
+// Drive a modem control line on the device being served to the state a client
+// asked for
+void tty_apply_dtr(bool assert_line);
+void tty_apply_rts(bool assert_line);
+
 void tty_search(void);
 GList *tty_search_for_serial_devices(void);

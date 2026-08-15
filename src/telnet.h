@@ -40,8 +40,18 @@ typedef enum
 // Everything settled with one peer. Negotiation is per connection, so a
 // session that faces several peers at once - the socket server does - needs one
 // of these each, or one peer's negotiation would decide what the others get.
+// Which end of the link this context sits on. The two see the same option
+// negotiation but opposite subnegotiations: a client receives the settings a
+// server applied, a server receives the settings a client is asking for.
+typedef enum
+{
+    TELNET_ROLE_CLIENT,
+    TELNET_ROLE_SERVER,
+} telnet_role_t;
+
 typedef struct
 {
+    telnet_role_t role;
     telnet_state_t state;
     unsigned char pending_command;
     bool engaged;
@@ -93,7 +103,13 @@ telnet_t *telnet_client(void);
 
 // Forget any negotiation state. Called per connection, since a reconnect faces
 // a peer that has to negotiate again from nothing.
-void telnet_reset(telnet_t *telnet);
+void telnet_reset(telnet_t *telnet, telnet_role_t role);
+
+// Offer the options a socket client may want, which is what starts negotiation
+// with a client that would otherwise wait to be spoken to. Only called when
+// the user asked the server to make the offer, since a client that does not
+// speak Telnet would read the offer as device output.
+void telnet_server_offer(telnet_t *telnet, int fd);
 
 // True once the peer has completed a negotiation - a command marker followed by
 // a request and its option, or the start of a subnegotiation - which is what
