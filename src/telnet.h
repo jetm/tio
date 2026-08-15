@@ -39,6 +39,11 @@ bool telnet_engaged(void);
 // the same buffer. Returns how many data bytes are left.
 size_t telnet_filter_input(int fd, char *buffer, size_t count);
 
+// Carry the serial settings to the remote port. Does nothing when the peer
+// declined the serial-port option, which leaves the session a plain byte
+// stream rather than a failure.
+void telnet_send_port_settings(int fd);
+
 // Write to a peer that speaks Telnet, doubling the command marker so that a
 // data byte equal to it is not read as the start of a command. Returns the
 // number of bytes of the caller's buffer that were sent, not the number of

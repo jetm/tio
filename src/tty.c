@@ -1562,6 +1562,12 @@ void tty_reconfigure(void)
             setspeed(device_fd, option.baudrate);
         }
     }
+    else if (connected && (device_mode == DEVICE_MODE_SOCKET))
+    {
+        /* The port these settings belong to is at the other end, so carry them
+         * there instead. Does nothing unless the peer took the option. */
+        telnet_send_port_settings(device_fd);
+    }
 }
 
 static bool is_serial_device(const char *format, ...)
