@@ -1649,6 +1649,13 @@ void tty_configure(void)
 
     memset(&tio, 0, sizeof(tio));
 
+    /* Describes the rate being configured now, not the first one ever
+     * configured. This was a one-shot at startup until a socket client could
+     * ask for a rate mid-session: left latched, one arbitrary rate would turn
+     * the speed verification off for every request after it, including the
+     * standard ones. */
+    standard_baudrate = true;
+
     /* Set speed */
     switch (option.baudrate)
     {
