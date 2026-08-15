@@ -328,7 +328,7 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 
 ssize_t net_send(int fd, const void *buffer, size_t count)
 {
-    if (telnet_engaged())
+    if (telnet_engaged(telnet_client()))
     {
         return telnet_send(fd, buffer, count);
     }

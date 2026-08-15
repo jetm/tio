@@ -651,7 +651,7 @@ static void tty_line_toggle_socket(int fd, int mask)
 
     assert_line = ((socket_line_state & mask) == 0);
 
-    if (!telnet_set_line(fd, control_line, assert_line))
+    if (!telnet_set_line(telnet_client(), fd, control_line, assert_line))
     {
         device_serial_only("Toggling a serial line");
         return;
@@ -1064,7 +1064,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_G:
-                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control())
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control(telnet_client()))
                 {
                     device_serial_only("Toggling a serial line");
                     break;
@@ -1082,7 +1082,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_P:
-                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control())
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control(telnet_client()))
                 {
                     device_serial_only("Pulsing a serial line");
                     break;
@@ -1102,7 +1102,7 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
             case KEY_B:
                 if (device_mode == DEVICE_MODE_SOCKET)
                 {
-                    if (!telnet_send_break(device_fd))
+                    if (!telnet_send_break(telnet_client(), device_fd))
                     {
                         device_serial_only("Sending break");
                     }
@@ -1624,7 +1624,7 @@ void tty_reconfigure(void)
     {
         /* The port these settings belong to is at the other end, so carry them
          * there instead. Does nothing unless the peer took the option. */
-        telnet_send_port_settings(device_fd);
+        telnet_send_port_settings(telnet_client(), device_fd);
     }
 }
 
@@ -2749,7 +2749,7 @@ void forward_to_device(int fd, char output_char)
                     {
                         if (device_mode == DEVICE_MODE_SOCKET)
                         {
-                            if (!telnet_send_break(fd))
+                            if (!telnet_send_break(telnet_client(), fd))
                             {
                                 device_serial_only("ONULBRK");
                                 return;
@@ -2825,7 +2825,7 @@ int device_connect(void)
 
         /* A reconnected peer negotiates again from nothing, so anything
          * settled with the previous one must not be carried over */
-        telnet_reset();
+        telnet_reset(telnet_client());
     }
     else
     {
@@ -3050,7 +3050,7 @@ int device_connect(void)
                      * anything to display or log. A block that was nothing but
                      * protocol leaves zero bytes and the loop below runs not
                      * at all, which is what should happen. */
-                    bytes_read = telnet_filter_input(device_fd, input_buffer, bytes_read);
+                    bytes_read = telnet_filter_input(telnet_client(), device_fd, input_buffer, bytes_read);
                 }
 
                 /* Update receive statistics */

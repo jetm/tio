@@ -71,70 +71,24 @@
 #define PARITY_VALUE_MARK  4
 #define PARITY_VALUE_SPACE 5
 
-#define OPTION_COUNT 256
-#define SUBNEG_MAX   64
+/* This session connects to exactly one peer as a client, so its context can
+ * live here rather than being handed in at every call site */
+static telnet_t client_context;
 
-typedef enum
+telnet_t *telnet_client(void)
 {
-    STATE_DATA,
-    STATE_COMMAND,
-    STATE_OPTION,
-    STATE_SUBNEG,
-    STATE_SUBNEG_COMMAND,
-} telnet_state_t;
-
-static telnet_state_t state = STATE_DATA;
-static unsigned char pending_command = 0;
-static bool engaged = false;
-
-/* What has been settled for each option, and whether it has been answered at
- * all. Both are needed: an unanswered request must be answered even when the
- * answer matches the current state, and an answered one must not be answered
- * again, which is what keeps the peer and us from trading the same pair of
- * commands forever. */
-static bool remote_enabled[OPTION_COUNT];
-static bool remote_answered[OPTION_COUNT];
-static bool local_enabled[OPTION_COUNT];
-static bool local_answered[OPTION_COUNT];
-
-static unsigned char subneg[SUBNEG_MAX];
-static size_t subneg_length = 0;
-static bool subneg_overflow = false;
-
-/* What was last asked of the remote port, kept so that the server's answer can
- * be compared against it. A server is entitled to answer with a different
- * value, and that difference is the whole point: it means the port could not
- * take the setting, which the user has to be told rather than shown as done. */
-static int requested_baudrate = 0;
-static int requested_databits = 0;
-static int requested_stopbits = 0;
-static int requested_parity = 0;
-static bool settings_sent = false;
-
-void telnet_reset(void)
-{
-    state = STATE_DATA;
-    pending_command = 0;
-    engaged = false;
-
-    memset(remote_enabled, 0, sizeof(remote_enabled));
-    memset(remote_answered, 0, sizeof(remote_answered));
-    memset(local_enabled, 0, sizeof(local_enabled));
-    memset(local_answered, 0, sizeof(local_answered));
-
-    subneg_length = 0;
-    subneg_overflow = false;
-
-    requested_baudrate = 0;
-    requested_databits = 0;
-    requested_stopbits = 0;
-    requested_parity = 0;
-    settings_sent = false;
+    return &client_context;
 }
 
-bool telnet_engaged(void)
+void telnet_reset(telnet_t *telnet)
 {
-    return engaged;
+    memset(telnet, 0, sizeof(*telnet));
+    telnet->state = TELNET_STATE_DATA;
+}
+
+bool telnet_engaged(const telnet_t *telnet)
+{
+    return telnet->engaged;
 }
 
 /* Binary keeps the high bit of a serial byte intact and suppress-go-ahead puts
@@ -153,11 +107,11 @@ static void send_command(int fd, unsigned char command, unsigned char opt)
     net_send_raw(fd, message, sizeof(message));
 }
 
-static void handle_remote_offer(int fd, unsigned char opt, bool offered)
+static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, bool offered)
 {
     bool wanted = offered && option_wanted(opt);
 
-    if (remote_answered[opt] && (remote_enabled[opt] == wanted))
+    if (telnet->remote_answered[opt] && (telnet->remote_enabled[opt] == wanted))
     {
         /* Already settled this way - answering again would only invite the
          * peer to repeat itself */
@@ -165,28 +119,28 @@ static void handle_remote_offer(int fd, unsigned char opt, bool offered)
     }
 
     send_command(fd, wanted ? DO : DONT, opt);
-    remote_enabled[opt] = wanted;
-    remote_answered[opt] = true;
+    telnet->remote_enabled[opt] = wanted;
+    telnet->remote_answered[opt] = true;
 }
 
-static void handle_local_request(int fd, unsigned char opt, bool requested)
+static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bool requested)
 {
     bool wanted = requested && option_wanted(opt);
 
-    if (local_answered[opt] && (local_enabled[opt] == wanted))
+    if (telnet->local_answered[opt] && (telnet->local_enabled[opt] == wanted))
     {
         return;
     }
 
     send_command(fd, wanted ? WILL : WONT, opt);
-    local_enabled[opt] = wanted;
-    local_answered[opt] = true;
+    telnet->local_enabled[opt] = wanted;
+    telnet->local_answered[opt] = true;
 
     if (wanted && (opt == OPT_COM_PORT))
     {
         /* The option is live now, so the settings the user asked for on the
          * command line can be carried to the remote port */
-        telnet_send_port_settings(fd);
+        telnet_send_port_settings(telnet, fd);
     }
 }
 
@@ -242,60 +196,60 @@ static unsigned char parity_value(parity_t parity)
     }
 }
 
-void telnet_send_port_settings(int fd)
+void telnet_send_port_settings(telnet_t *telnet, int fd)
 {
     unsigned char values[4];
 
-    if (!local_enabled[OPT_COM_PORT])
+    if (!telnet->local_enabled[OPT_COM_PORT])
     {
         /* Peer declined the option, so the session carries bytes only and the
          * serial settings stay a local matter */
         return;
     }
 
-    if (settings_sent &&
-        (requested_baudrate == option.baudrate) &&
-        (requested_databits == option.databits) &&
-        (requested_stopbits == option.stopbits) &&
-        (requested_parity == parity_value(option.parity)))
+    if (telnet->settings_sent &&
+        (telnet->requested_baudrate == option.baudrate) &&
+        (telnet->requested_databits == option.databits) &&
+        (telnet->requested_stopbits == option.stopbits) &&
+        (telnet->requested_parity == parity_value(option.parity)))
     {
         /* Reached from a reconfigure that changed something else - resending
          * would put four lines of settings on screen for a mapping keypress */
         return;
     }
 
-    settings_sent = true;
+    telnet->settings_sent = true;
 
-    requested_baudrate = option.baudrate;
+    telnet->requested_baudrate = option.baudrate;
     values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
     values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
     values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
     values[3] = (unsigned char) ((unsigned int) option.baudrate);
     send_subneg(fd, COM_SET_BAUDRATE, values, 4);
 
-    requested_databits = option.databits;
+    telnet->requested_databits = option.databits;
     values[0] = (unsigned char) option.databits;
     send_subneg(fd, COM_SET_DATASIZE, values, 1);
 
-    requested_parity = parity_value(option.parity);
-    values[0] = (unsigned char) requested_parity;
+    telnet->requested_parity = parity_value(option.parity);
+    values[0] = (unsigned char) telnet->requested_parity;
     send_subneg(fd, COM_SET_PARITY, values, 1);
 
-    requested_stopbits = option.stopbits;
+    telnet->requested_stopbits = option.stopbits;
     values[0] = (unsigned char) option.stopbits;
     send_subneg(fd, COM_SET_STOPSIZE, values, 1);
 }
 
-bool telnet_serial_control(void)
+bool telnet_serial_control(const telnet_t *telnet)
 {
-    return local_enabled[OPT_COM_PORT];
+    return telnet->local_enabled[OPT_COM_PORT];
 }
 
-bool telnet_send_break(int fd)
+bool telnet_send_break(telnet_t *telnet, int fd)
 {
     unsigned char value;
 
-    if (!telnet_serial_control())
+    if (!telnet_serial_control(telnet))
     {
         return false;
     }
@@ -311,11 +265,11 @@ bool telnet_send_break(int fd)
     return true;
 }
 
-bool telnet_set_line(int fd, telnet_line_t line, bool assert_line)
+bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line)
 {
     unsigned char value;
 
-    if (!telnet_serial_control())
+    if (!telnet_serial_control(telnet))
     {
         return false;
     }
@@ -381,46 +335,46 @@ static void report_parity(long applied, long wanted)
     }
 }
 
-static void handle_com_port_response(void)
+static void handle_com_port_response(const telnet_t *telnet)
 {
     unsigned char command;
 
-    if (subneg_length < 2)
+    if (telnet->subneg_length < 2)
     {
         return;
     }
 
-    command = subneg[1];
+    command = telnet->subneg[1];
 
     switch (command)
     {
         case COM_SET_BAUDRATE + SERVER_OFFSET:
-            if (subneg_length >= 6)
+            if (telnet->subneg_length >= 6)
             {
-                long applied = ((long) subneg[2] << 24) | ((long) subneg[3] << 16) |
-                               ((long) subneg[4] << 8) | (long) subneg[5];
-                report_setting("baud rate", applied, requested_baudrate);
+                long applied = ((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
+                               ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5];
+                report_setting("baud rate", applied, telnet->requested_baudrate);
             }
             break;
 
         case COM_SET_DATASIZE + SERVER_OFFSET:
-            if (subneg_length >= 3)
+            if (telnet->subneg_length >= 3)
             {
-                report_setting("data bits", subneg[2], requested_databits);
+                report_setting("data bits", telnet->subneg[2], telnet->requested_databits);
             }
             break;
 
         case COM_SET_PARITY + SERVER_OFFSET:
-            if (subneg_length >= 3)
+            if (telnet->subneg_length >= 3)
             {
-                report_parity(subneg[2], requested_parity);
+                report_parity(telnet->subneg[2], telnet->requested_parity);
             }
             break;
 
         case COM_SET_STOPSIZE + SERVER_OFFSET:
-            if (subneg_length >= 3)
+            if (telnet->subneg_length >= 3)
             {
-                report_setting("stop bits", subneg[2], requested_stopbits);
+                report_setting("stop bits", telnet->subneg[2], telnet->requested_stopbits);
             }
             break;
 
@@ -429,39 +383,39 @@ static void handle_com_port_response(void)
     }
 }
 
-static void handle_subneg(void)
+static void handle_subneg(const telnet_t *telnet)
 {
-    if (subneg_overflow)
+    if (telnet->subneg_overflow)
     {
         /* A payload longer than anything this speaks; acting on a truncated
          * one would be worse than ignoring it */
         return;
     }
 
-    if ((subneg_length >= 1) && (subneg[0] == OPT_COM_PORT))
+    if ((telnet->subneg_length >= 1) && (telnet->subneg[0] == OPT_COM_PORT))
     {
-        handle_com_port_response();
+        handle_com_port_response(telnet);
     }
 }
 
-static void handle_option(int fd, unsigned char command, unsigned char opt)
+static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
 {
     switch (command)
     {
         case WILL:
-            handle_remote_offer(fd, opt, true);
+            handle_remote_offer(telnet, fd, opt, true);
             break;
 
         case WONT:
-            handle_remote_offer(fd, opt, false);
+            handle_remote_offer(telnet, fd, opt, false);
             break;
 
         case DO:
-            handle_local_request(fd, opt, true);
+            handle_local_request(telnet, fd, opt, true);
             break;
 
         case DONT:
-            handle_local_request(fd, opt, false);
+            handle_local_request(telnet, fd, opt, false);
             break;
 
         default:
@@ -469,7 +423,7 @@ static void handle_option(int fd, unsigned char command, unsigned char opt)
     }
 }
 
-size_t telnet_filter_input(int fd, char *buffer, size_t count)
+size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
 {
     unsigned char *input = (unsigned char *) buffer;
     size_t kept = 0;
@@ -478,87 +432,125 @@ size_t telnet_filter_input(int fd, char *buffer, size_t count)
     {
         unsigned char byte = input[i];
 
-        switch (state)
+        switch (telnet->state)
         {
-            case STATE_DATA:
+            case TELNET_STATE_DATA:
                 if (byte == IAC)
                 {
-                    /* The first command marker is what tells us the peer is
-                     * speaking Telnet rather than sending raw bytes */
-                    engaged = true;
-                    state = STATE_COMMAND;
+                    if (telnet->engaged || !telnet->saw_data)
+                    {
+                        /* Either the peer is known to speak Telnet, or it has
+                         * sent nothing but this, so the marker may still be the
+                         * start of a negotiation. Parse it and let the bytes
+                         * that follow decide. */
+                        telnet->state = TELNET_STATE_COMMAND;
+                    }
+                    else
+                    {
+                        /* A peer that sent data before it ever negotiated is
+                         * not speaking Telnet, so this is one of its data
+                         * bytes. Reading it as a command is how a raw peer -
+                         * tio's own socket server among them - used to lose two
+                         * bytes and have every marker doubled back at it for
+                         * the rest of the session. */
+                        input[kept++] = byte;
+                    }
                 }
                 else
                 {
+                    telnet->saw_data = true;
                     input[kept++] = byte;
                 }
                 break;
 
-            case STATE_COMMAND:
+            case TELNET_STATE_COMMAND:
                 if (byte == IAC)
                 {
                     /* Doubled marker - the peer means the byte itself */
                     input[kept++] = byte;
-                    state = STATE_DATA;
+                    telnet->state = TELNET_STATE_DATA;
                 }
                 else if ((byte == WILL) || (byte == WONT) || (byte == DO) || (byte == DONT))
                 {
-                    pending_command = byte;
-                    state = STATE_OPTION;
+                    telnet->pending_command = byte;
+                    telnet->state = TELNET_STATE_OPTION;
                 }
                 else if (byte == SB)
                 {
-                    subneg_length = 0;
-                    subneg_overflow = false;
-                    state = STATE_SUBNEG;
+                    /* A subnegotiation is structure no raw byte stream produces
+                     * by accident, so this settles that the peer speaks Telnet */
+                    telnet->engaged = true;
+                    telnet->subneg_length = 0;
+                    telnet->subneg_overflow = false;
+                    telnet->state = TELNET_STATE_SUBNEG;
                 }
                 else
                 {
-                    /* A command that carries no option and that a serial
-                     * session has nothing to do with */
-                    state = STATE_DATA;
+                    if (!telnet->engaged && ((kept + 1) <= i))
+                    {
+                        /* Not a negotiation after all, so the marker was a data
+                         * byte and so is this one. Put both back.
+                         *
+                         * The room test is what makes writing them safe: two
+                         * bytes were consumed to get here and none of them was
+                         * kept, so kept has fallen at least two behind i and
+                         * both slots sit in territory already read. It fails
+                         * only when the marker ended one read and this byte
+                         * began the next, where there is no slot to expand
+                         * into; that costs those two bytes and nothing after
+                         * them. */
+                        input[kept++] = IAC;
+                        input[kept++] = byte;
+                        telnet->saw_data = true;
+                    }
+                    /* Otherwise: a command that carries no option, which a
+                     * serial session has nothing to do with. */
+                    telnet->state = TELNET_STATE_DATA;
                 }
                 break;
 
-            case STATE_OPTION:
-                handle_option(fd, pending_command, byte);
-                state = STATE_DATA;
+            case TELNET_STATE_OPTION:
+                /* A marker, a request and its option: a complete negotiation,
+                 * which is the point the peer is known to speak Telnet */
+                telnet->engaged = true;
+                handle_option(telnet, fd, telnet->pending_command, byte);
+                telnet->state = TELNET_STATE_DATA;
                 break;
 
-            case STATE_SUBNEG:
+            case TELNET_STATE_SUBNEG:
                 if (byte == IAC)
                 {
-                    state = STATE_SUBNEG_COMMAND;
+                    telnet->state = TELNET_STATE_SUBNEG_COMMAND;
                 }
-                else if (subneg_length < sizeof(subneg))
+                else if (telnet->subneg_length < sizeof(telnet->subneg))
                 {
-                    subneg[subneg_length++] = byte;
+                    telnet->subneg[telnet->subneg_length++] = byte;
                 }
                 else
                 {
-                    subneg_overflow = true;
+                    telnet->subneg_overflow = true;
                 }
                 break;
 
-            case STATE_SUBNEG_COMMAND:
+            case TELNET_STATE_SUBNEG_COMMAND:
                 if (byte == SE)
                 {
-                    handle_subneg();
-                    state = STATE_DATA;
+                    handle_subneg(telnet);
+                    telnet->state = TELNET_STATE_DATA;
                 }
                 else
                 {
                     /* A doubled marker inside the payload stands for the byte
                      * itself, as it does in the data stream */
-                    if (subneg_length < sizeof(subneg))
+                    if (telnet->subneg_length < sizeof(telnet->subneg))
                     {
-                        subneg[subneg_length++] = byte;
+                        telnet->subneg[telnet->subneg_length++] = byte;
                     }
                     else
                     {
-                        subneg_overflow = true;
+                        telnet->subneg_overflow = true;
                     }
-                    state = STATE_SUBNEG;
+                    telnet->state = TELNET_STATE_SUBNEG;
                 }
                 break;
         }
