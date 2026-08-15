@@ -33,6 +33,7 @@
 #include "print.h"
 #include "options.h"
 #include "tty.h"
+#include "telnet.h"
 #include "xymodem.h"
 #include "log.h"
 #include "script.h"
@@ -262,26 +263,34 @@ static int api_write(lua_State *L)
 {
     size_t len = 0;
     const char *string = luaL_checklstring(L, 1, &len);
-    ssize_t ret;
-    int attempts = 100;
 
-    do {
-        ret = write(device_fd, string, len);
+    /* Goes out the same way typed input does, so that a socket target gets the
+     * command marker escaped and the output mapping is applied. Writing the
+     * descriptor directly put a bare marker on the wire and the peer read it
+     * as the start of a command.
+     *
+     * Copied a chunk at a time because the write path maps characters in
+     * place, and a Lua string is interned and shared - mapping it where it
+     * lies would alter every other reference to it. */
+    while (len > 0)
+    {
+        char chunk[BUFSIZ];
+        size_t count = (len < sizeof(chunk)) ? len : sizeof(chunk);
+        ssize_t ret;
+
+        memcpy(chunk, string, count);
+
+        ret = device_write(device_fd, chunk, count);
         if (ret < 0)
             return luaL_error(L, "%s", strerror(errno));
+        if (ret == 0)
+            return luaL_error(L, "partial write");
 
-        len -= ret;
         string += ret;
-    } while (len > 0 && --attempts);
-
-    if (len > 0)
-        return luaL_error(L, "partial write");
-
-    if (device_mode == DEVICE_MODE_TTY)
-    {
-        fsync(device_fd);  // flush these characters now
-        tcdrain(device_fd); //ensure we flushed characters to our device
+        len -= ret;
     }
+
+    device_sync(device_fd);
 
     lua_getglobal(L, "tio");
 
@@ -289,6 +298,36 @@ static int api_write(lua_State *L)
 }
 
 // lua: tio.read(size, timeout)
+/* Read for the script API, taking the protocol out of what the script sees and
+ * answering it, exactly as the main loop does. Without this a script on an
+ * RFC 2217 target reads negotiation as data - a server's opening offer alone
+ * is around twenty bytes of it - and, because the negotiation is never
+ * answered, escaping on the write side never engages either.
+ *
+ * A read that was entirely protocol waits again rather than reporting a
+ * timeout that did not happen. The wait restarts, so a peer that keeps sending
+ * protocol can stretch the caller's timeout; negotiation is a burst at the
+ * start of a connection, so in practice that is a round or two. */
+static ssize_t script_read_poll(void *data, size_t len, int timeout)
+{
+    while (true)
+    {
+        ssize_t ret = read_poll(device_fd, data, len, timeout);
+
+        if ((ret <= 0) || (device_mode != DEVICE_MODE_SOCKET))
+        {
+            return ret;
+        }
+
+        ret = (ssize_t) telnet_filter_input(telnet_client(), device_fd, data,
+                                            (size_t) ret);
+        if (ret > 0)
+        {
+            return ret;
+        }
+    }
+}
+
 static int api_read(lua_State *L)
 {
     int size = luaL_checkinteger(L, 1);
@@ -310,7 +349,7 @@ static int api_read(lua_State *L)
     char *p = luaL_prepbuffer(&buffer);
 #endif
 
-    ssize_t ret = read_poll(device_fd, p, size, timeout);
+    ssize_t ret = script_read_poll(p, size, timeout);
     if (ret < 0)
         return luaL_error(L, "%s", strerror(errno));
 
@@ -345,7 +384,7 @@ static int api_readline(lua_State *L) {
     luaL_buffinit(L, &b);
     luaL_prepbuffer(&b);
     while (true) {
-        int ret = read_poll(device_fd, &ch, 1, timeout);
+        int ret = (int) script_read_poll(&ch, 1, timeout);
 
         if (ret < 0)
             return luaL_error(L, "%s", strerror(errno));

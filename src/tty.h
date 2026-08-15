@@ -90,6 +90,13 @@ void tty_input_thread_create(void);
 void tty_input_thread_wait_ready(void);
 void tty_line_set(int fd, tty_line_config_t line_config[]);
 
+// Write to the connected device, applying the output character mapping and
+// whatever the negotiated protocol requires on the way out. Buffers; call
+// device_sync() to put it on the wire. Maps in place, so the caller's buffer
+// must be writable and must not be shared.
+ssize_t device_write(int fd, const void *buffer, size_t count);
+void device_sync(int fd);
+
 // Report an operation that only a serial line can carry out, when the session
 // is connected to a socket. Returns true when the caller must not proceed.
 bool device_serial_only(const char *operation);
