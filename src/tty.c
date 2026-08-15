@@ -77,6 +77,7 @@
 #include "fs.h"
 #include "readline.h"
 #include "net.h"
+#include "telnet.h"
 
 /* tty device listing configuration */
 
@@ -2749,6 +2750,10 @@ int device_connect(void)
         {
             goto error_open;
         }
+
+        /* A reconnected peer negotiates again from nothing, so anything
+         * settled with the previous one must not be carried over */
+        telnet_reset();
     }
     else
     {
@@ -2964,6 +2969,16 @@ int device_connect(void)
                      * has likely closed. Either way the session reconnects. */
                     tio_error_printf_silent("Could not read from device");
                     goto error_read;
+                }
+
+                if (device_mode == DEVICE_MODE_SOCKET)
+                {
+                    /* Take the protocol out here, ahead of the statistics, so
+                     * that negotiation is counted as neither received data nor
+                     * anything to display or log. A block that was nothing but
+                     * protocol leaves zero bytes and the loop below runs not
+                     * at all, which is what should happen. */
+                    bytes_read = telnet_filter_input(device_fd, input_buffer, bytes_read);
                 }
 
                 /* Update receive statistics */
