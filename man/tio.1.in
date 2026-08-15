@@ -312,6 +312,35 @@ At present there is a hardcoded limit of 16 clients connected at one time.
 .RE
 
 .TP
+.BR "    \-\-socket\-rfc2217"
+
+Offer RFC 2217 to clients of the socket set by \fB\-\-socket\fR.
+
+A client that takes the option can configure the served serial port over the
+socket - baud rate, framing, break and the \fBDTR\fR and \fBRTS\fR lines - in
+the same way \fBtio\fR itself does when connecting to a socket target. Each
+request is answered with the setting the port ended up at, which is not the
+requested one when the port could not manage it.
+
+Without this option the socket carries a raw byte stream and nothing is sent to
+a client unasked, which is the default and is what every existing client of
+\fB\-\-socket\fR expects. The option is not offered by default because a client
+that does not speak Telnet has no way to tell an offer from device output.
+
+With the option enabled the offer is made to every client on connect, so a
+client that does not speak Telnet will see the negotiation bytes. Enable it
+when the clients are known to be RFC 2217 capable.
+
+A client is not acted on until it takes the option: one that declines it, or
+never answers, cannot configure the port.
+
+Note that the offer itself goes to every client on connect, and a client that
+speaks Telnet is written to as one from that moment. A client that does not
+speak it will see the negotiation, and a device byte equal to the command
+marker reaches it doubled. That is the cost of the option and the reason it is
+not the default.
+
+.TP
 .BR "    \-\-rs\-485"
 
 Enable RS-485 mode.
@@ -417,16 +446,37 @@ writes \fBinet:localhost:4242\fR.
 .RE
 
 .PP
-The session behaves as it does on a serial device, with the exception of the
-operations a socket cannot carry out. Sending a break, toggling or pulsing
-modem lines, showing line states, flushing the I/O buffers, and x/y-modem
-transfers all report that they are unavailable rather than acting. The
-\fBONULBRK\fR output mapping and the \fBtio.line_set()\fR and \fBtio.send()\fR
-script functions report the same.
+A server may speak RFC 2217, the Telnet extension that carries serial port
+control over a socket. Negotiation is handled automatically when the peer
+offers it: protocol bytes are consumed rather than displayed, and they count as
+neither received data nor log content.
 
 .PP
-Serial port settings such as baud rate, data bits, and parity have no effect on
-a socket target, since the connection carries bytes rather than driving a line.
+What a session can do depends on whether the peer took that option. On an RFC
+2217 peer, sending a break, toggling or pulsing the \fBDTR\fR and \fBRTS\fR
+lines, and the \fBONULBRK\fR output mapping are carried to the remote port and
+work as they do on a local one. The other modem lines are inputs, and are
+declined by name rather than driven. On a plain socket those same operations
+report that they are unavailable rather than acting.
+
+.PP
+Showing line states, flushing the I/O buffers, x/y-modem transfers, and the
+\fBtio.line_set()\fR and \fBtio.send()\fR script functions report themselves
+unavailable on any socket target, whether or not the peer speaks RFC 2217.
+
+.PP
+Serial port settings such as baud rate, data bits, parity and stop bits are
+carried to the remote port on an RFC 2217 peer, but only the ones given on the
+command line for that invocation. A setting left at its default, or set in a
+configuration file, is not sent: a configuration file describes how to open a
+local device, and a remote port belongs to whoever is already using it.
+Attaching without naming a setting therefore leaves the port exactly as it was
+found.
+
+What is reported as set is what the server says it applied, which is not always
+what was asked for: a port that cannot manage a setting is reported as not
+having taken it. On a plain socket these settings have no effect, since the
+connection carries bytes rather than driving a line.
 
 .PP
 A socket target reconnects on disconnect under the usual rules, so a session
