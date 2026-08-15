@@ -86,7 +86,6 @@ typedef struct
     int requested_databits;
     int requested_stopbits;
     int requested_parity;
-    bool settings_sent;
 } telnet_t;
 
 // The modem control lines a client can drive. The remaining lines on a serial
