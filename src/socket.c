@@ -124,7 +124,7 @@ void socket_configure(void)
     struct sockaddr_in6 sockaddr_inet6 = {};
     struct sockaddr *sockaddr_p;
     socklen_t socklen;
-    int optval;
+    int optval = 1;
 
     /* Parse socket string */
 
