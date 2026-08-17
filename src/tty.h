@@ -112,6 +112,7 @@ int tty_apply_baudrate(int baudrate);
 int tty_apply_databits(int databits);
 int tty_apply_stopbits(int stopbits);
 parity_t tty_apply_parity(parity_t parity);
+flow_t tty_apply_flow(flow_t flow);
 
 // Send a break on the device being served, at a client's request
 void tty_apply_break(void);

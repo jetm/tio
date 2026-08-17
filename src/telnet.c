@@ -533,12 +533,53 @@ static control_group_t control_group(unsigned char request)
 /* Carry out a request. Only the set values do anything: a request value asks
  * what the state is and must leave it alone, which is what makes reading the
  * table correctly load-bearing rather than cosmetic. */
+/* The three flow-control modes a client can name, in either direction. RFC 2217
+ * numbers them from the group's request value, so the offset is the same on both
+ * sides and one mapping serves both. */
+static flow_t control_flow_mode(unsigned char request, unsigned char group_base)
+{
+    switch (request - group_base)
+    {
+        case 2:
+            return FLOW_SOFT;
+
+        case 3:
+            return FLOW_HARD;
+
+        default:
+            return FLOW_NONE;
+    }
+}
+
 static void control_apply(unsigned char request)
 {
     switch (request)
     {
         case CONTROL_BREAK_ON:
             tty_apply_break();
+            break;
+
+        case CONTROL_FLOW_NONE:
+        case CONTROL_FLOW_SOFT:
+        case CONTROL_FLOW_HARD:
+            /* Carried rather than echoed. This was the one group that answered
+             * without applying: a client asking for no flow control against a
+             * server running hardware flow was silently not given the setting and
+             * then correctly told the port was at hardware - two truthful halves
+             * that add up to a refusal the client cannot act on. pyserial reads
+             * that as an open failure, and by this code's own rule for every
+             * other setting it is right to. */
+            tty_apply_flow(control_flow_mode(request, CONTROL_FLOW_REQUEST));
+            break;
+
+        case CONTROL_FLOW_IN_NONE:
+        case CONTROL_FLOW_IN_SOFT:
+        case CONTROL_FLOW_IN_HARD:
+            /* A serial port has one flow-control configuration, not one per
+             * direction: IXON and IXOFF are set together by software flow, and
+             * CRTSCTS governs both ways. So the inbound request names the same
+             * setting from the other side rather than a second one. */
+            tty_apply_flow(control_flow_mode(request, CONTROL_FLOW_IN_REQUEST));
             break;
 
         case CONTROL_DTR_ON:
@@ -553,8 +594,9 @@ static void control_apply(unsigned char request)
 
         default:
             /* Break-off needs nothing, since the break already released the
-             * line; flow control is not offered; and every request value is a
-             * question rather than an instruction. */
+             * line; the flow-control modes keyed off a modem line are not
+             * implementable here; and every request value is a question rather
+             * than an instruction. */
             break;
     }
 }
@@ -565,8 +607,10 @@ static unsigned char control_state(unsigned char request)
     switch (control_group(request))
     {
         case CONTROL_GROUP_FLOW_OUT:
-            /* A client cannot change it here, so the answer is what the port was
-             * configured with rather than what was asked for. */
+            /* What the port is at now, which after an apply is what it took and
+             * not necessarily what was asked for - the same rule as every other
+             * setting. Read back rather than remembered, so a mode the device
+             * refused is reported as refused. */
             return (unsigned char) tty_flow_control_value();
 
         case CONTROL_GROUP_FLOW_IN:

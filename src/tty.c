@@ -684,9 +684,17 @@ static bool tty_settings_took_effect(void)
      * the false success this function exists to catch. Where the platform has
      * no such bit at all the local definition keeps this compiling, and the
      * request then reads as not taken, which is the truth. */
-    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR;
+    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR | CRTSCTS;
 
-    return (check.c_cflag & verified) == (tio.c_cflag & verified);
+    /* Flow control straddles the two flag words: hardware flow lives in c_cflag
+     * with the framing bits above, software flow in c_iflag, which nothing here
+     * used to read. Verifying only c_cflag would let a software-flow request
+     * report success without checking anything at all - the same false success
+     * the CMSPAR bit is in the mask to prevent, one word over. */
+    const tcflag_t verified_input = IXON | IXOFF | IXANY;
+
+    return ((check.c_cflag & verified) == (tio.c_cflag & verified))
+            && ((check.c_iflag & verified_input) == (tio.c_iflag & verified_input));
 }
 
 /* A request that cannot be carried out has to leave the device as it was, or
@@ -799,6 +807,26 @@ int tty_apply_stopbits(int stopbits)
     }
 
     return stopbits;
+}
+
+flow_t tty_apply_flow(flow_t flow)
+{
+    flow_t previous = option.flow;
+
+    if (!tty_serving_device() || (flow == previous))
+    {
+        return previous;
+    }
+
+    option.flow = flow;
+    if (!tty_settings_took_effect())
+    {
+        option.flow = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return flow;
 }
 
 parity_t tty_apply_parity(parity_t parity)
