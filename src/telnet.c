@@ -19,6 +19,7 @@
  * 02110-1301, USA.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -775,8 +776,46 @@ ssize_t telnet_send(int fd, const void *buffer, size_t count)
     {
         ssize_t status = net_send_raw(fd, escaped + sent, produced - sent);
 
+        if (status < 0)
+        {
+            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
+            {
+                /* Nothing has gone wrong with the stream, so carry on from
+                 * where this stopped. Giving up here is what left a doubled
+                 * marker split down the middle. */
+                continue;
+            }
+        }
+
         if (status <= 0)
         {
+            /* Report the caller's bytes whose escaped form went out in full,
+             * and let it re-supply the rest.
+             *
+             * Returning the error instead threw away how much had already been
+             * sent, and the caller - which resumes from what it was told went
+             * out - resent those bytes on top of the ones already on the wire.
+             * That is the mirror of losing them: the wire gained bytes because
+             * the accounting fell behind it. */
+            size_t escaped_len = 0;
+            size_t whole = 0;
+
+            while (whole < consumed)
+            {
+                size_t width = (input[whole] == IAC) ? 2u : 1u;
+
+                if ((escaped_len + width) > sent)
+                {
+                    break;
+                }
+                escaped_len += width;
+                whole++;
+            }
+
+            if (whole > 0)
+            {
+                return (ssize_t) whole;
+            }
             return status;
         }
 
