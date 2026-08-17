@@ -176,7 +176,15 @@ static unsigned long rx_total = 0, tx_total = 0;
 static bool connected = false;
 static bool standard_baudrate = true;
 static void (*printchar)(char c);
-static int device_fd;
+/* -1 until a device is open, and -1 again once it is closed. Left at its default of 0 this
+ * named STDIN whenever no device was connected, and the key commands do not check that one
+ * is: ctrl-t shift-F before the first connection called tcflush(0) and announced "Flushed
+ * data I/O buffers", having flushed the user's own terminal, and ctrl-t L read modem lines
+ * off fd 0 - harmless against a pty, which has none to report, but tio run from a real
+ * serial terminal would report that terminal's lines as the device's. After a disconnect
+ * the danger is the same shape and worse aimed: the number belongs to whatever opened
+ * next. -1 makes every such use fail instead of landing somewhere. */
+static int device_fd = -1;
 static char hex_chars[2];
 static unsigned char hex_char_index = 0;
 static char tty_buffer[BUFSIZ*2];
@@ -478,8 +486,19 @@ void *tty_stdin_input_thread(void *arg)
                             {
                                 break;
                             }
-                            tio_printf("Flushed data I/O buffers")
-                            tcflush(device_fd, TCIOFLUSH);
+                            /* Announced after the fact, not before it. Printing first
+                             * meant the message was unconditional: pressed with no device
+                             * open it claimed to have flushed buffers while tcflush was
+                             * failing on a descriptor that named something else. */
+                            if (tcflush(device_fd, TCIOFLUSH) == 0)
+                            {
+                                tio_printf("Flushed data I/O buffers");
+                            }
+                            else
+                            {
+                                tio_warning_printf("Could not flush data I/O buffers (%s)",
+                                        strerror(errno));
+                            }
                             break;
                         default:
                             break;
@@ -3117,6 +3136,7 @@ void device_disconnect(void)
             flock(device_fd, LOCK_UN);
         }
         close(device_fd);
+        device_fd = -1;
         connected = false;
 
         /* Fire alert action */
