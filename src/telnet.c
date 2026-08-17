@@ -51,16 +51,37 @@
 #define COM_SET_PARITY   3
 #define COM_SET_STOPSIZE 4
 #define COM_SET_CONTROL  5
+#define COM_PURGE_DATA   12
 #define SERVER_OFFSET    100
+
+/* PURGE-DATA values */
+#define PURGE_RX   1
+#define PURGE_TX   2
+#define PURGE_BOTH 3
 
 /* RFC 2217 SET-CONTROL values. A break is a pair rather than a duration: the
  * line is held and then released, so the length is the client's to decide. */
+#define CONTROL_FLOW_REQUEST 0
+#define CONTROL_FLOW_NONE    1
+#define CONTROL_FLOW_SOFT    2
+#define CONTROL_FLOW_HARD    3
 #define CONTROL_BREAK_ON  4
 #define CONTROL_BREAK_OFF 5
 #define CONTROL_DTR_ON    6
 #define CONTROL_DTR_OFF   7
 #define CONTROL_RTS_ON    8
 #define CONTROL_RTS_OFF   9
+
+/* Inbound flow control repeats the outbound values ten higher, and the three
+ * request-the-current-state values sit above those */
+#define CONTROL_FLOW_IN_REQUEST 10
+#define CONTROL_FLOW_IN_NONE    11
+#define CONTROL_FLOW_IN_SOFT    12
+#define CONTROL_FLOW_IN_HARD    13
+#define CONTROL_FLOW_IN_OFFSET  10
+#define CONTROL_BREAK_REQUEST   14
+#define CONTROL_DTR_REQUEST     15
+#define CONTROL_RTS_REQUEST     16
 
 /* Matches what tcsendbreak sends for a zero duration, so a break behaves the
  * same whether the port is local or at the far end of a socket */
@@ -433,6 +454,54 @@ static parity_t parity_from_value(unsigned char value)
  * which is the requested one only when the device could take it. Answering
  * with the request instead would tell the client a device it cannot see is
  * configured in a way it is not. */
+/* What to answer a SET-CONTROL request with. The protocol asks for the state the
+ * port is in, not an echo of the request, and it groups three separate things
+ * behind one command: flow control, the break, and the two modem lines. Each
+ * has its own value space, and the request identifies which one is being asked
+ * about even when the port cannot do what was asked. */
+static unsigned char control_state(unsigned char request)
+{
+    switch (request)
+    {
+        /* Outbound flow control. A client cannot change it here, so the answer
+         * is what the port was configured with rather than what was asked. */
+        case CONTROL_FLOW_REQUEST:
+        case CONTROL_FLOW_NONE:
+        case CONTROL_FLOW_SOFT:
+        case CONTROL_FLOW_HARD:
+            return (unsigned char) tty_flow_control_value();
+
+        /* Inbound flow control is the same three answers in its own range */
+        case CONTROL_FLOW_IN_REQUEST:
+        case CONTROL_FLOW_IN_NONE:
+        case CONTROL_FLOW_IN_SOFT:
+        case CONTROL_FLOW_IN_HARD:
+            return (unsigned char) (tty_flow_control_value() + CONTROL_FLOW_IN_OFFSET);
+
+        /* The break is a pulse rather than a state that is held, so by the time
+         * this answers the line has already been released */
+        case CONTROL_BREAK_ON:
+        case CONTROL_BREAK_OFF:
+        case CONTROL_BREAK_REQUEST:
+            return CONTROL_BREAK_OFF;
+
+        case CONTROL_DTR_ON:
+        case CONTROL_DTR_OFF:
+        case CONTROL_DTR_REQUEST:
+            return tty_dtr_asserted() ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
+
+        case CONTROL_RTS_ON:
+        case CONTROL_RTS_OFF:
+        case CONTROL_RTS_REQUEST:
+            return tty_rts_asserted() ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
+
+        default:
+            /* Nothing known about it, so say back what was asked rather than
+             * inventing a state for something this does not understand */
+            return request;
+    }
+}
+
 static void handle_com_port_request(const telnet_t *telnet, int fd)
 {
     unsigned char command;
@@ -508,7 +577,9 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
         case COM_SET_CONTROL:
             if (telnet->subneg_length >= 3)
             {
-                switch (telnet->subneg[2])
+                unsigned char request = telnet->subneg[2];
+
+                switch (request)
                 {
                     case CONTROL_BREAK_ON:
                         tty_apply_break();
@@ -516,12 +587,12 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
 
                     case CONTROL_DTR_ON:
                     case CONTROL_DTR_OFF:
-                        tty_apply_dtr(telnet->subneg[2] == CONTROL_DTR_ON);
+                        tty_apply_dtr(request == CONTROL_DTR_ON);
                         break;
 
                     case CONTROL_RTS_ON:
                     case CONTROL_RTS_OFF:
-                        tty_apply_rts(telnet->subneg[2] == CONTROL_RTS_ON);
+                        tty_apply_rts(request == CONTROL_RTS_ON);
                         break;
 
                     default:
@@ -529,6 +600,33 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                          * released the line, and flow control is not offered */
                         break;
                 }
+
+                /* Answer it. Every other setting command reports the value the
+                 * port ended up at and this one reported nothing, which is not
+                 * a missing nicety: a client that waits for the answer cannot
+                 * finish opening the port. pyserial does exactly that and timed
+                 * out here, so a served socket could not be opened by it at all
+                 * - the one thing the option exists for. */
+                values[0] = control_state(request);
+                send_subneg(fd, COM_SET_CONTROL + SERVER_OFFSET, values, 1);
+            }
+            break;
+
+        case COM_PURGE_DATA:
+            if (telnet->subneg_length >= 3)
+            {
+                unsigned char what = telnet->subneg[2];
+
+                /* Discarding buffered data is part of opening a port for a
+                 * client that wants a known starting state, and pyserial asks
+                 * for it during open - so leaving it unimplemented stopped the
+                 * session getting established at all, the same way an
+                 * unanswered control request did. */
+                tty_apply_purge((what == PURGE_RX) || (what == PURGE_BOTH),
+                        (what == PURGE_TX) || (what == PURGE_BOTH));
+
+                values[0] = what;
+                send_subneg(fd, COM_PURGE_DATA + SERVER_OFFSET, values, 1);
             }
             break;
 

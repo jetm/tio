@@ -866,6 +866,78 @@ void tty_apply_rts(bool assert_line)
     tty_line_drive(TIOCM_RTS, assert_line);
 }
 
+int tty_flow_control_value(void)
+{
+    switch (option.flow)
+    {
+        case FLOW_SOFT:
+            return 2;
+
+        case FLOW_HARD:
+            return 3;
+
+        default:
+            return 1;
+    }
+}
+
+/* Reading the line rather than remembering what was last asked for: a request
+ * has to be answered with what the port is doing, and a driver is free not to
+ * have done what it was told. */
+static bool tty_line_asserted(int mask)
+{
+    int state;
+
+    if (!tty_serving_device() || (ioctl(device_fd, TIOCMGET, &state) < 0))
+    {
+        return false;
+    }
+
+    return (state & mask) != 0;
+}
+
+bool tty_dtr_asserted(void)
+{
+    return tty_line_asserted(TIOCM_DTR);
+}
+
+bool tty_rts_asserted(void)
+{
+    return tty_line_asserted(TIOCM_RTS);
+}
+
+void tty_apply_purge(bool input, bool output)
+{
+    int queue;
+
+    if (!tty_serving_device())
+    {
+        return;
+    }
+
+    if (input && output)
+    {
+        queue = TCIOFLUSH;
+    }
+    else if (input)
+    {
+        queue = TCIFLUSH;
+    }
+    else if (output)
+    {
+        queue = TCOFLUSH;
+    }
+    else
+    {
+        return;
+    }
+
+    if (tcflush(device_fd, queue) < 0)
+    {
+        tio_warning_printf("Could not discard buffered data (%s)", strerror(errno));
+    }
+}
+
 /* A socket carries no line state to read back, so what was last asked for is
  * tracked here instead. Both lines start asserted because that is what a
  * server does when it opens the port. */
