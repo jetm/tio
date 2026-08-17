@@ -305,14 +305,28 @@ static int api_write(lua_State *L)
  * answered, escaping on the write side never engages either.
  *
  * A read that was entirely protocol waits again rather than reporting a
- * timeout that did not happen. The wait restarts, so a peer that keeps sending
- * protocol can stretch the caller's timeout; negotiation is a burst at the
- * start of a connection, so in practice that is a round or two. */
+  * timeout that did not happen, but it waits for what is LEFT of the caller's
+  * timeout rather than for the whole of it again. Restarting the clock made the
+  * timeout an upper bound on nothing: a peer sending protocol every 200 ms held a
+  * one-second read open for as long as it kept talking, measured at 6.2 s. That
+  * was excused as a burst at the start of a connection, which is true of
+  * negotiation and not true in general - and a script's timeout is what a script
+  * uses to decide a device is not answering, so stretching it disables exactly
+  * the caller's own error handling.
+  *
+  * One deadline for the whole call, monotonic so that a clock adjustment mid-read
+  * cannot move it. A negative timeout means wait forever and has no deadline to
+  * compute. */
 static ssize_t script_read_poll(void *data, size_t len, int timeout)
 {
+    struct timespec start;
+    int remaining = timeout;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     while (true)
     {
-        ssize_t ret = read_poll(device_fd, data, len, timeout);
+        ssize_t ret = read_poll(device_fd, data, len, remaining);
 
         if ((ret <= 0) || (device_mode != DEVICE_MODE_SOCKET))
         {
@@ -324,6 +338,25 @@ static ssize_t script_read_poll(void *data, size_t len, int timeout)
         if (ret > 0)
         {
             return ret;
+        }
+
+        if (timeout >= 0)
+        {
+            struct timespec now;
+            long elapsed;
+
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            elapsed = ((now.tv_sec - start.tv_sec) * 1000)
+                    + ((now.tv_nsec - start.tv_nsec) / 1000000);
+
+            if (elapsed >= timeout)
+            {
+                /* Report the timeout the caller asked for. read_poll says 0 for a
+                 * timeout, which is what this returns rather than an error: nothing
+                 * went wrong, the data just did not come. */
+                return 0;
+            }
+            remaining = timeout - (int) elapsed;
         }
     }
 }
