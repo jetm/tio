@@ -333,6 +333,23 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
     if (FD_ISSET(sockfd, rdfs))
     {
         int clientfd = accept(sockfd, NULL, NULL);
+
+        /* Suppress SIGPIPE on this connection the way the client and the
+         * listening socket already do. Every write to a client goes to a
+         * descriptor from accept(), so relying on accept() to inherit the option
+         * from the listener would make the whole server path depend on a
+         * platform detail rather than on a call. */
+#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
+        if (clientfd >= 0)
+        {
+            int optval = 1;
+            if (setsockopt(clientfd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval)))
+            {
+                tio_warning_printf("Could not set socket options (%s)", strerror(errno));
+            }
+        }
+#endif
+
         /* this loop should always succeed because we don't select on sockfd when full */
         for (int i = 0; i != MAX_SOCKET_CLIENTS; ++i)
         {
