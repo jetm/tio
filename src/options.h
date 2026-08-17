@@ -78,6 +78,7 @@ struct option_t
     bool prefix_enabled;
     bool mute;
     bool socket_rfc2217;
+    bool rfc2217;
 
     // Whether each serial setting was given on the command line for this
     // invocation. A socket target needs the difference: configuration file

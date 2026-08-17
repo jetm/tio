@@ -272,6 +272,11 @@ static void config_parse_keys(GKeyFile *key_file, char *group)
         string = NULL;
     }
     config_get_bool(key_file, group, "mute", &option.mute);
+    /* Whether either side of a socket speaks RFC 2217 belongs to the target, so
+     * it has to be settable per profile. A user whose profile names a ser2net
+     * port would otherwise have to remember the flag on every invocation. */
+    config_get_bool(key_file, group, "rfc2217", &option.rfc2217);
+    config_get_bool(key_file, group, "socket-rfc2217", &option.socket_rfc2217);
     config_get_string(key_file, group, "script", &option.script, NULL);
     config_get_string(key_file, group, "script-file", &option.script_filename, NULL);
     config_get_string(key_file, group, "script-run", &string, NULL);

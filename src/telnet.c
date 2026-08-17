@@ -109,11 +109,12 @@ telnet_t *telnet_client(void)
     return &client_context;
 }
 
-void telnet_reset(telnet_t *telnet, telnet_role_t role)
+void telnet_reset(telnet_t *telnet, telnet_role_t role, bool enabled)
 {
     memset(telnet, 0, sizeof(*telnet));
     telnet->state = TELNET_STATE_DATA;
     telnet->role = role;
+    telnet->enabled = enabled;
 }
 
 bool telnet_engaged(const telnet_t *telnet)
@@ -731,6 +732,11 @@ static void handle_subneg(const telnet_t *telnet, int fd)
 
 void telnet_server_offer(telnet_t *telnet, int fd)
 {
+    if (!telnet->enabled)
+    {
+        return;
+    }
+
     /* Speaking first is the commitment. Waiting for the client to send a
      * command marker before escaping would leave every device byte equal to
      * one going out bare in the meantime, and a client that only ever reads
@@ -796,6 +802,13 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
     unsigned char *input = (unsigned char *) buffer;
     size_t kept = 0;
 
+    if (!telnet->enabled)
+    {
+        /* Not a Telnet link, so there is no protocol in here to find. Every
+         * byte is data, including the ones that look like a command. */
+        return count;
+    }
+
     for (size_t i = 0; i < count; i++)
     {
         unsigned char byte = input[i];
@@ -805,28 +818,10 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
             case TELNET_STATE_DATA:
                 if (byte == IAC)
                 {
-                    if (telnet->engaged || !telnet->saw_data)
-                    {
-                        /* Either the peer is known to speak Telnet, or it has
-                         * sent nothing but this, so the marker may still be the
-                         * start of a negotiation. Parse it and let the bytes
-                         * that follow decide. */
-                        telnet->state = TELNET_STATE_COMMAND;
-                    }
-                    else
-                    {
-                        /* A peer that sent data before it ever negotiated is
-                         * not speaking Telnet, so this is one of its data
-                         * bytes. Reading it as a command is how a raw peer -
-                         * tio's own socket server among them - used to lose two
-                         * bytes and have every marker doubled back at it for
-                         * the rest of the session. */
-                        input[kept++] = byte;
-                    }
+                    telnet->state = TELNET_STATE_COMMAND;
                 }
                 else
                 {
-                    telnet->saw_data = true;
                     input[kept++] = byte;
                 }
                 break;
@@ -854,25 +849,8 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                 }
                 else
                 {
-                    if (!telnet->engaged && ((kept + 1) <= i))
-                    {
-                        /* Not a negotiation after all, so the marker was a data
-                         * byte and so is this one. Put both back.
-                         *
-                         * The room test is what makes writing them safe: two
-                         * bytes were consumed to get here and none of them was
-                         * kept, so kept has fallen at least two behind i and
-                         * both slots sit in territory already read. It fails
-                         * only when the marker ended one read and this byte
-                         * began the next, where there is no slot to expand
-                         * into; that costs those two bytes and nothing after
-                         * them. */
-                        input[kept++] = IAC;
-                        input[kept++] = byte;
-                        telnet->saw_data = true;
-                    }
-                    /* Otherwise: a command that carries no option, which a
-                     * serial session has nothing to do with. */
+                    /* A command that carries no option, which a serial session
+                     * has nothing to do with */
                     telnet->state = TELNET_STATE_DATA;
                 }
                 break;

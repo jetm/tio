@@ -37,9 +37,6 @@ typedef enum
     TELNET_STATE_SUBNEG_COMMAND,
 } telnet_state_t;
 
-// Everything settled with one peer. Negotiation is per connection, so a
-// session that faces several peers at once - the socket server does - needs one
-// of these each, or one peer's negotiation would decide what the others get.
 // Which end of the link this context sits on. The two see the same option
 // negotiation but opposite subnegotiations: a client receives the settings a
 // server applied, a server receives the settings a client is asking for.
@@ -49,9 +46,24 @@ typedef enum
     TELNET_ROLE_SERVER,
 } telnet_role_t;
 
+// Everything settled with one peer. Negotiation is per connection, so a
+// session that faces several peers at once - the socket server does - needs one
+// of these each, or one peer's negotiation would decide what the others get.
 typedef struct
 {
     telnet_role_t role;
+
+    // Whether this context speaks Telnet at all. Both ends of the link are
+    // opt-in and the user says so per side: --rfc2217 for the peer this session
+    // connects to, --socket-rfc2217 for the peers it serves. Off, the stream is
+    // carried through byte for byte and nothing is ever written to the peer
+    // that the user did not type.
+    //
+    // It lives here rather than at the call sites so that the decision is made
+    // once. A caller that forgets to ask cannot reach the protocol, which is
+    // what an earlier per-call-site gate could not promise.
+    bool enabled;
+
     telnet_state_t state;
     unsigned char pending_command;
     bool engaged;
@@ -61,13 +73,6 @@ typedef struct
     // waits to be asked; the offer is only made once the peer has shown it
     // speaks Telnet, so a raw peer is still never written to unasked.
     bool com_port_offered;
-
-    // Whether any data byte has arrived from the peer yet. A peer that sends
-    // data before it ever negotiates is not speaking Telnet, so a command
-    // marker after that point is a data byte rather than the start of a
-    // command. Without this a single 0xff of device output turns a raw peer
-    // into a Telnet one for the rest of the session.
-    bool saw_data;
 
     // What has been settled for each option, and whether it has been answered
     // at all. Both are needed: an unanswered request must be answered even when
@@ -107,8 +112,10 @@ typedef enum
 telnet_t *telnet_client(void);
 
 // Forget any negotiation state. Called per connection, since a reconnect faces
-// a peer that has to negotiate again from nothing.
-void telnet_reset(telnet_t *telnet, telnet_role_t role);
+// a peer that has to negotiate again from nothing. Whether this side speaks
+// Telnet is settled here too, because it is a property of the whole context and
+// not of any one call into it.
+void telnet_reset(telnet_t *telnet, telnet_role_t role, bool enabled);
 
 // Offer the options a socket client may want, which is what starts negotiation
 // with a client that would otherwise wait to be spoken to. Only called when
@@ -117,15 +124,9 @@ void telnet_reset(telnet_t *telnet, telnet_role_t role);
 void telnet_server_offer(telnet_t *telnet, int fd);
 
 // True once the peer has completed a negotiation - a command marker followed by
-// a request and its option, or the start of a subnegotiation - which is what
-// identifies it as speaking Telnet. Until then the stream is carried through
-// untouched, so a raw peer - tio's own socket server among them - is not
-// escaped at.
-//
-// A lone command marker is deliberately not enough. It is a legal data byte,
-// and treating the first one as proof of Telnet meant a single 0xff of device
-// output from a raw peer engaged the session permanently and doubled every
-// marker sent back to a peer that would never un-double it.
+// a request and its option, or the start of a subnegotiation. Never true on a
+// context the user did not enable, so a session that was not asked to speak
+// Telnet cannot be talked into it by the bytes that arrive.
 bool telnet_engaged(const telnet_t *telnet);
 
 // True when the peer took the serial-port option, which is what decides

@@ -262,6 +262,17 @@ OPTIONS
               RFC 2217 over it is a different matter: any client that can reach the port can then set the baud rate, drop DTR and assert a break on the attached board, and a break on a Linux console is a SysRq key. Prefer --socket unix:,
               which is protected by file permissions, or keep the port off any network the machine does not own.
 
+           --rfc2217
+
+              Speak  RFC 2217 to a socket target, so that serial port settings, break and the DTR and RTS lines are carried to the remote port rather than reported unavailable. This is the client-side counterpart of --socket-rfc2217, and
+              it is what a ser2net telnet port wants.
+
+              Without it a socket target is a raw byte stream in both directions: no Telnet is parsed, no negotiation is answered, and nothing is written to the peer that was not typed. That is the default because the two cases cannot be
+              told apart from the bytes. A plain peer is free to send a command marker as data - it is a legal byte on an 8-bit line - and a session that guessed from the traffic would answer a device that speaks no protocol, putting ne‐
+              gotiation bytes on somebody's console.
+
+              The option can also be set per profile in the configuration file as rfc2217, since whether a target speaks the protocol is a property of that target rather than of one invocation.
+
            --rs-485
 
               Enable RS-485 mode.
@@ -341,8 +352,8 @@ SOCKET TARGETS
 
               Note that the field differs from the one --socket takes. A server binds a port and so writes inet:4242, while a client must reach a host and so writes inet:localhost:4242.
 
-       A server may speak RFC 2217, the Telnet extension that carries serial port control over a socket. Negotiation is handled automatically when the peer offers it: protocol bytes are consumed rather than displayed, and they count as
-       neither received data nor log content.
+       A server may speak RFC 2217, the Telnet extension that carries serial port control over a socket. Pass --rfc2217 to speak it: negotiation is then handled for you, and protocol bytes are consumed rather than displayed, counting as
+       neither received data nor log content. Without the option the target is treated as a plain byte stream, whatever it sends.
 
        What a session can do depends on whether the peer took that option. On an RFC 2217 peer, sending a break, toggling or pulsing the DTR and RTS lines, and the ONULBRK output mapping are carried to the remote port and work as  they
        do on a local one. The other modem lines are inputs, and are declined by name rather than driven. On a plain socket those same operations report that they are unavailable rather than acting.

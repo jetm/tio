@@ -37,6 +37,7 @@ _tio()
           -c --color \
           -S --socket \
              --socket-rfc2217 \
+             --rfc2217 \
              --input-mode \
              --output-mode \
              --rs-485 \

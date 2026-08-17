@@ -146,6 +146,7 @@ Options:
   -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)
   -S, --socket <socket>                  Redirect I/O to socket
       --socket-rfc2217                   Offer RFC 2217 to socket clients
+      --rfc2217                          Speak RFC 2217 to a socket target
       --rs-485                           Enable RS-485 mode
       --rs-485-config <config>           Set RS-485 configuration
       --alert bell|blink|none            Alert on connect/disconnect (default: none)

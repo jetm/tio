@@ -3193,7 +3193,7 @@ int device_connect(void)
 
         /* A reconnected peer negotiates again from nothing, so anything
          * settled with the previous one must not be carried over */
-        telnet_reset(telnet_client(), TELNET_ROLE_CLIENT);
+        telnet_reset(telnet_client(), TELNET_ROLE_CLIENT, option.rfc2217);
     }
     else
     {
