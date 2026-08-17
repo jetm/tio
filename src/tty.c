@@ -308,6 +308,16 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
             {
                 // Error
                 tio_debug_printf("Write error (%s)", strerror(errno));
+                /* Report the error when nothing went out. Returning the count so
+                 * far is right once some of it did - the caller can see the
+                 * shortfall - but returning zero for a write that failed
+                 * outright is indistinguishable from success to every caller
+                 * that tests for a negative, so none of them ever saw a failure
+                 * on this path. */
+                if (bytes_written == 0)
+                {
+                    return -1;
+                }
                 break;
             }
             bytes_written += retval;
