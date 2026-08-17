@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -473,8 +474,15 @@ static void handle_com_port_response(const telnet_t *telnet)
         case COM_SET_BAUDRATE + SERVER_OFFSET:
             if (telnet->subneg_length >= 6)
             {
-                long applied = ((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
-                               ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5];
+                /* Accumulated unsigned. A byte of 0x80 or more shifted into bit 31 of a
+                 * signed 32-bit type overflows it, which is undefined rather than
+                 * merely negative - and `long` is 32 bits wherever tio is built for a
+                 * 32-bit target, which for a serial tool is most of them. Any baud rate
+                 * at or above 2147483648 carries such a byte. */
+                long applied = (long) (((uint32_t) telnet->subneg[2] << 24)
+                                     | ((uint32_t) telnet->subneg[3] << 16)
+                                     | ((uint32_t) telnet->subneg[4] << 8)
+                                     | (uint32_t) telnet->subneg[5]);
                 report_setting("baud rate", applied, telnet->requested_baudrate);
             }
             break;
@@ -709,8 +717,16 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
         case COM_SET_BAUDRATE:
             if (telnet->subneg_length >= 6)
             {
-                int asked = (int) (((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
-                                   ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5]);
+                /* Unsigned for the same reason as the answer path above. The conversion
+                 * to int that follows is implementation-defined for a value past
+                 * INT_MAX rather than undefined, and tty_apply_baudrate rejects
+                 * whatever it produces through tty_baudrate_acceptable - so a peer
+                 * sending 0xFFFFFFFF gets its request refused, not a shift that the
+                 * compiler was free to assume could not happen. */
+                int asked = (int) (((uint32_t) telnet->subneg[2] << 24)
+                                 | ((uint32_t) telnet->subneg[3] << 16)
+                                 | ((uint32_t) telnet->subneg[4] << 8)
+                                 | (uint32_t) telnet->subneg[5]);
 
                 applied = tty_apply_baudrate(asked);
                 values[0] = (unsigned char) ((unsigned int) applied >> 24);
