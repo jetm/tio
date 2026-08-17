@@ -3209,6 +3209,12 @@ int device_connect(void)
         /* A reconnected peer negotiates again from nothing, so anything
          * settled with the previous one must not be carried over */
         telnet_reset(telnet_client(), TELNET_ROLE_CLIENT, option.rfc2217);
+
+        /* The cached line state is settled with a peer too, so it belongs to the
+         * same reset. A remote port reopens with both lines asserted; a cache
+         * left saying DTR was dropped would make the next toggle assert a line
+         * that was already asserted and report a change that did not happen. */
+        socket_line_state = TIOCM_DTR | TIOCM_RTS;
     }
     else
     {
