@@ -340,6 +340,15 @@ speak it will see the negotiation, and a device byte equal to the command
 marker reaches it doubled. That is the cost of the option and the reason it is
 not the default.
 
+A socket set by \fB\-\-socket inet:\fR or \fB\-\-socket inet6:\fR is bound on
+every interface and asks nobody for a password. That is defensible while the
+socket carries bytes, because bytes are all a client can put on the line.
+Offering RFC 2217 over it is a different matter: any client that can reach the
+port can then set the baud rate, drop \fBDTR\fR and assert a break on the
+attached board, and a break on a Linux console is a SysRq key. Prefer
+\fB\-\-socket unix:\fR, which is protected by file permissions, or keep the port
+off any network the machine does not own.
+
 .TP
 .BR "    \-\-rs\-485"
 
