@@ -187,6 +187,13 @@ static pthread_mutex_t mutex_input_ready = PTHREAD_MUTEX_INITIALIZER;
 static char line[PATH_MAX];
 static size_t listing_device_name_length_max = 0;
 
+/* Whether the wait loop may probe without pausing first. True at startup and
+ * again after every successful connect, so a session that ran and then lost its
+ * peer retries at once; false while attempts keep failing, which is what paces a
+ * loop that would otherwise spin. It lives out here rather than inside the loop
+ * because only a successful connect knows when to clear it. */
+static bool probe_immediately = true;
+
 static void optional_local_echo(char c)
 {
     if (!option.local_echo)
@@ -2457,7 +2464,6 @@ void device_wait(void)
     struct timeval tv;
     static char input_char;
     static bool first = true;
-    static bool first_pass = true;
     static int last_errno = 0;
 
     /* Loop until device pops up */
@@ -2473,12 +2479,18 @@ void device_wait(void)
              * can fail at once, and an unpaced one of those is a spin. The
              * stale-socket case was exactly that - access(F_OK) succeeded on a
              * file whose server had died without unlinking it. Interactive mode
-             * is paced by the select() timeout below instead. */
-            if (!first_pass)
+             * is paced by the select() timeout below instead.
+             *
+             * The exemption is per attempt-that-followed-a-success, not per
+             * process. Pacing every entry after the first would put a second on
+             * the front of every reconnect, where a dropped session used to
+             * retry at once - and for a socket target, a peer restarting is the
+             * ordinary case rather than an unusual one. */
+            if (!probe_immediately)
             {
                 sleep(1);
             }
-            first_pass = false;
+            probe_immediately = false;
         }
 
         tty_search();
@@ -2835,6 +2847,21 @@ int device_connect(void)
             }
         }
     }
+
+    /* The port is open and configured, so the next wait may probe without pausing.
+     *
+     * This has to sit after the last setup step that can fail, not next to the
+     * "Connected to" that announces the open. Opening is not the success the
+     * exemption is about: tcgetattr, tcsetattr and setspeed each jump to an error
+     * label that returns TIO_ERROR to the connect loop, and a device that opens but
+     * cannot be configured fails there on every pass. Arming the exemption before
+     * them re-arms it on every pass too, so the pause is never taken - not once,
+     * unlike a spin that at least settles.
+     *
+     * A recurring configure failure is not exotic: a device unplugged between open()
+     * and tcsetattr() lands here, and the reconnect path is where a device is being
+     * unplugged by definition. */
+    probe_immediately = true;
 
     /* If stdin is a pipe forward all input to tty device */
     if (interactive_mode == false)
