@@ -68,11 +68,17 @@ typedef struct
     unsigned char pending_command;
     bool engaged;
 
-    // Whether this side has offered the serial-port option itself. A client is
-    // otherwise purely reactive, which leaves it silent against a server that
-    // waits to be asked; the offer is only made once the peer has shown it
-    // speaks Telnet, so a raw peer is still never written to unasked.
-    bool com_port_offered;
+    // Whether this side has already sent WILL for the serial-port option, and
+    // whether it has already sent DO. Two flags rather than one, because they are
+    // opposite commitments: WILL offers to provide the option, DO asks the peer to.
+    // Sharing a flag made a server that had sent DO suppress the WILL it owed a
+    // client that asked - the answer that says the option is available at all.
+    //
+    // A client is otherwise purely reactive, which leaves it silent against a
+    // server that waits to be asked; its WILL is only sent once the peer has shown
+    // it speaks Telnet, so a raw peer is still never written to unasked.
+    bool com_port_will_sent;
+    bool com_port_do_sent;
 
     // What has been settled for each option, and whether it has been answered
     // at all. Both are needed: an unanswered request must be answered even when

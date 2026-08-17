@@ -149,7 +149,13 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    send_command(fd, wanted ? DO : DONT, opt);
+    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_do_sent))
+    {
+        /* Skipped only when this is the peer agreeing to a DO already sent from
+         * here: repeating it would be a second request for the same option.
+         * Mirrors the same test on the WILL side. */
+        send_command(fd, wanted ? DO : DONT, opt);
+    }
     telnet->remote_enabled[opt] = wanted;
     telnet->remote_answered[opt] = true;
 }
@@ -163,10 +169,10 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_offered))
+    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_will_sent))
     {
-        /* Skipped only when this is the peer agreeing to an offer already made
-         * from here: repeating it would be a second offer of the same option */
+        /* Skipped only when this is the peer agreeing to a WILL already sent from
+         * here: repeating it would be a second offer of the same option */
         send_command(fd, wanted ? WILL : WONT, opt);
     }
     telnet->local_enabled[opt] = wanted;
@@ -761,6 +767,17 @@ void telnet_server_offer(telnet_t *telnet, int fd)
     telnet->remote_answered[OPT_BINARY] = true;
 
     send_command(fd, DO, OPT_COM_PORT);
+
+    /* Record that the offer was made, so the client's answer is read as an answer
+     * rather than as an unsolicited offer needing one - which is what drew a
+     * second DO for the same option on every negotiated session.
+     *
+     * Deliberately NOT remote_enabled/remote_answered, which the two lines above
+     * do set for binary. remote_enabled[OPT_COM_PORT] is the test that refuses
+     * serial requests from a client that never took the option; asserting it here
+     * would mean a client that ignores the offer and sends requests anyway gets
+     * them honoured. Asking is not being answered. */
+    telnet->com_port_do_sent = true;
 }
 
 static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
@@ -797,10 +814,10 @@ static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsig
      * put three protocol bytes in front of a peer that speaks no protocol, and
      * tio's own socket server forwards whatever it is sent straight to the
      * serial device, so those bytes would land on somebody's console. */
-    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_offered
+    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_will_sent
             && !telnet->local_answered[OPT_COM_PORT])
     {
-        telnet->com_port_offered = true;
+        telnet->com_port_will_sent = true;
         send_command(fd, WILL, OPT_COM_PORT);
     }
 }
