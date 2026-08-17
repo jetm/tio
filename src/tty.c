@@ -821,11 +821,49 @@ parity_t tty_apply_parity(parity_t parity)
     return parity;
 }
 
+/* Shortest gap between two breaks a client can ask for. A break holds the line
+ * and blocks the loop that serves every other client for as long as it lasts, so
+ * an unlimited stream of requests makes both the device and the server unusable -
+ * and the option is reachable over an unauthenticated network socket. The
+ * negotiation gate bounds who may ask, not how often.
+ *
+ * A quarter second is roughly one break's own duration, so a client sending them
+ * back to back is slowed to the rate the line can carry rather than refused, and
+ * a client using break as it is meant to be used never notices. */
+#define BREAK_MIN_INTERVAL_MS 250
+
 void tty_apply_break(void)
 {
-    if (tty_serving_device())
+    static struct timespec last_break = { 0, 0 };
+    struct timespec now;
+    long elapsed_ms;
+
+    if (!tty_serving_device())
     {
-        tcsendbreak(device_fd, 0);
+        return;
+    }
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+    {
+        if ((last_break.tv_sec != 0) || (last_break.tv_nsec != 0))
+        {
+            elapsed_ms = ((now.tv_sec - last_break.tv_sec) * 1000L)
+                    + ((now.tv_nsec - last_break.tv_nsec) / 1000000L);
+
+            if (elapsed_ms < BREAK_MIN_INTERVAL_MS)
+            {
+                tio_debug_printf("Ignoring a break requested %ld ms after the last one", elapsed_ms);
+                return;
+            }
+        }
+        last_break = now;
+    }
+
+    if (tcsendbreak(device_fd, 0) < 0)
+    {
+        /* Reported here rather than at each caller, so a break that could not be
+         * sent is not silent on one path and diagnosed on another */
+        tio_warning_printf("Could not send break to tty device (%s)", strerror(errno));
     }
 }
 
@@ -3080,7 +3118,15 @@ void forward_to_device(int fd, char output_char)
                         }
                         else
                         {
-                            status = tcsendbreak(fd, 0);
+                            /* Through the same gate the protocol path uses. This
+                             * one needs no negotiation at all - a plain socket
+                             * client sending NUL bytes reaches a break on the
+                             * served device - so leaving it ungated left the
+                             * cheaper of the two paths open. A suppressed break
+                             * is not an error, and a failed one is reported
+                             * inside. */
+                            tty_apply_break();
+                            status = 0;
                         }
                     }
                     else
