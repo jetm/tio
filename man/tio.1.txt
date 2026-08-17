@@ -255,6 +255,10 @@ OPTIONS
 
               A client is not acted on until it takes the option: one that declines it, or never answers, cannot configure the port.
 
+              With  this  option  one  client  is served at a time, and a further connection is refused with a message rather than accepted. The serial settings belong to the process, so a second client's baud rate, framing, DTR or break
+              would land on the line the first client is using, with nothing to tell it and nothing to put back when either leaves. RFC 2217 describes one client configuring one port.  Without the option the socket carries bytes, and all
+              16 slots stay available.
+
               Note that the offer itself goes to every client on connect, and a client that speaks Telnet is written to as one from that moment. A client that does not speak it will see the negotiation, and a device byte equal  to  the
               command marker reaches it doubled. That is the cost of the option and the reason it is not the default.
 
