@@ -55,6 +55,7 @@
 #include <errno.h>
 #include <time.h>
 #include <dirent.h>
+#include <poll.h>
 #include <pthread.h>
 #include <glib.h>
 #include "config.h"
@@ -230,20 +231,50 @@ inline static unsigned char char_to_nibble(char c)
     }
 }
 
+/* How long a flush waits on a device that is taking nothing at all. The budget
+ * is spent only while there is no progress - any accepted byte returns it in
+ * full - so this bounds a wedged line rather than a slow one. */
+#define FLUSH_POLL_MS       100
+#define FLUSH_MAX_STALLED   100
+
 void tty_sync(int fd)
 {
+    char *read_ptr = tty_buffer;
+    size_t remaining = tty_buffer_count;
+    int attempts = FLUSH_MAX_STALLED;
     ssize_t count;
 
-    while (tty_buffer_count > 0)
+    while (remaining > 0)
     {
-        count = write(fd, tty_buffer, tty_buffer_count);
+        count = write(fd, read_ptr, remaining);
         if (count < 0)
         {
-            // Error
-            tio_debug_printf("Write error while flushing tty buffer (%s)", strerror(errno));
+            if (((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
+                    && (--attempts > 0))
+            {
+                /* The device is opened non-blocking and the flag is never
+                 * cleared, so no room left in the transmit buffer is an
+                 * ordinary outcome rather than a failure. Wait for the line to
+                 * take more and resume where this stopped. */
+                struct pollfd fds = { .fd = fd, .events = POLLOUT, .revents = 0 };
+                poll(&fds, 1, FLUSH_POLL_MS);
+                continue;
+            }
+            tio_warning_printf("Write error while flushing tty buffer, %zu bytes lost (%s)",
+                    remaining, strerror(errno));
             break;
         }
-        tty_buffer_count -= count;
+        if (count == 0)
+        {
+            /* Neither an error nor progress. Treating it as a successful write
+             * of nothing advances no pointer and frees no budget, which turns
+             * this into a busy spin with no way out. */
+            tio_warning_printf("Write stalled while flushing tty buffer, %zu bytes lost", remaining);
+            break;
+        }
+        read_ptr += count;
+        remaining -= (size_t) count;
+        attempts = FLUSH_MAX_STALLED;
         fsync(fd);
         tcdrain(fd);
     }
