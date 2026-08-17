@@ -115,6 +115,26 @@ void telnet_reset(telnet_t *telnet, telnet_role_t role, bool enabled)
     telnet->state = TELNET_STATE_DATA;
     telnet->role = role;
     telnet->enabled = enabled;
+
+    /* Asking for the option is the commitment, so a client escapes from its first
+     * byte rather than from the peer's first command.
+     *
+     * This is the same decision telnet_server_offer() already makes for the server,
+     * and for the same reason: waiting for the peer to prove it speaks Telnet leaves
+     * every byte equal to the marker going out bare until it does. On the client that
+     * window is not a corner case but the common one - a peer's offer costs a round
+     * trip while piped input is ready immediately, so a short piped payload always
+     * won the race and went out unescaped. A lone 0xFF then took the byte behind it
+     * with it, and the marker-doubling rule differed by role for no reason anyone
+     * had argued for.
+     *
+     * Engaging does not send anything, so the rule that a client never writes to a
+     * raw peer unasked still holds - what changes is how its own data bytes are
+     * encoded, and only when the user asked for the protocol. */
+    if (enabled && (role == TELNET_ROLE_CLIENT))
+    {
+        telnet->engaged = true;
+    }
 }
 
 bool telnet_engaged(const telnet_t *telnet)
