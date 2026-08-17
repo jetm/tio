@@ -144,13 +144,26 @@ bool telnet_serial_control(const telnet_t *telnet);
 // the same buffer. Returns how many data bytes are left.
 size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count);
 
-// Ask the remote port for a break. Returns false when the peer never took the
-// serial-port option, leaving the caller to report the operation unavailable.
-bool telnet_send_break(telnet_t *telnet, int fd);
+// What became of a request to the remote port. Three outcomes rather than a bool,
+// because "the session cannot carry this" and "the session could not deliver it" want
+// different words to the user and, more importantly, different bookkeeping: a request
+// that was never delivered must leave the caller's idea of the remote state alone.
+// Collapsing them is what let a failed line request be recorded as a state change.
+typedef enum
+{
+    TELNET_REQUEST_SENT,
+    TELNET_REQUEST_UNAVAILABLE,
+    TELNET_REQUEST_FAILED,
+} telnet_request_t;
 
-// Drive a modem control line on the remote port. Returns false on a peer that
-// did not take the serial-port option.
-bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line);
+// Ask the remote port for a break. UNAVAILABLE when the peer never took the
+// serial-port option, leaving the caller to report the operation unavailable.
+telnet_request_t telnet_send_break(telnet_t *telnet, int fd);
+
+// Drive a modem control line on the remote port. UNAVAILABLE on a peer that did not
+// take the serial-port option; FAILED when the request could not be delivered, in which
+// case the line did not move and no cached state may be advanced.
+telnet_request_t telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line);
 
 // Carry the serial settings to the remote port. Does nothing when the peer
 // declined the serial-port option, which leaves the session a plain byte

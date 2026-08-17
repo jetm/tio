@@ -207,7 +207,10 @@ static size_t append_value(unsigned char *out, size_t at, unsigned char value)
     return at;
 }
 
-static void send_subneg(int fd, unsigned char command, const unsigned char *values, size_t count)
+/* Returns whether the whole message reached the peer. net_send_raw already refuses to
+ * send a protocol message in part, so anything short of the full length is a delivery
+ * failure rather than a partial write to resume. */
+static bool send_subneg(int fd, unsigned char command, const unsigned char *values, size_t count)
 {
     unsigned char message[8 + 2 * 4];
     size_t at = 0;
@@ -225,7 +228,7 @@ static void send_subneg(int fd, unsigned char command, const unsigned char *valu
     message[at++] = IAC;
     message[at++] = SE;
 
-    net_send_raw(fd, message, at);
+    return net_send_raw(fd, message, at) == (ssize_t) at;
 }
 
 static unsigned char parity_value(parity_t parity)
@@ -313,33 +316,46 @@ bool telnet_serial_control(const telnet_t *telnet)
     return telnet->local_enabled[OPT_COM_PORT];
 }
 
-bool telnet_send_break(telnet_t *telnet, int fd)
+telnet_request_t telnet_send_break(telnet_t *telnet, int fd)
 {
     unsigned char value;
 
     if (!telnet_serial_control(telnet))
     {
-        return false;
+        return TELNET_REQUEST_UNAVAILABLE;
     }
 
     value = CONTROL_BREAK_ON;
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(fd, COM_SET_CONTROL, &value, 1))
+    {
+        /* Return before the wait and before the release. Sleeping for a break that was
+         * never asserted only delays the caller, and releasing one costs another failed
+         * send to say nothing. */
+        return TELNET_REQUEST_FAILED;
+    }
 
     usleep(BREAK_DURATION_US);
 
     value = CONTROL_BREAK_OFF;
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(fd, COM_SET_CONTROL, &value, 1))
+    {
+        /* Worse than failing to start one: the peer was asked to assert a break and
+         * never asked to stop, so the remote line stays broken until the session ends.
+         * Reported as a failure so the caller says so rather than reporting a break
+         * that ended. */
+        return TELNET_REQUEST_FAILED;
+    }
 
-    return true;
+    return TELNET_REQUEST_SENT;
 }
 
-bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line)
+telnet_request_t telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line)
 {
     unsigned char value;
 
     if (!telnet_serial_control(telnet))
     {
-        return false;
+        return TELNET_REQUEST_UNAVAILABLE;
     }
 
     if (line == TELNET_LINE_DTR)
@@ -351,9 +367,12 @@ bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_l
         value = assert_line ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
     }
 
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(fd, COM_SET_CONTROL, &value, 1))
+    {
+        return TELNET_REQUEST_FAILED;
+    }
 
-    return true;
+    return TELNET_REQUEST_SENT;
 }
 
 static void report_setting(const char *name, long applied, long wanted)

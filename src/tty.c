@@ -1047,10 +1047,23 @@ static void tty_line_toggle_socket(int fd, int mask)
 
     assert_line = ((socket_line_state & mask) == 0);
 
-    if (!telnet_set_line(telnet_client(), fd, control_line, assert_line))
+    switch (telnet_set_line(telnet_client(), fd, control_line, assert_line))
     {
-        device_serial_only("Toggling a serial line");
-        return;
+        case TELNET_REQUEST_UNAVAILABLE:
+            device_serial_only("Toggling a serial line");
+            return;
+
+        case TELNET_REQUEST_FAILED:
+            /* Return before touching the cache. The cache is what the NEXT toggle
+             * derives its direction from, so advancing it here would make the following
+             * toggle ask for the state the peer is already in - turning a request that
+             * failed once into a line that cannot be driven at all. */
+            tio_warning_printf("Could not send the %s request to the peer (%s)",
+                    tty_line_name(mask), strerror(errno));
+            return;
+
+        case TELNET_REQUEST_SENT:
+            break;
     }
 
     if (assert_line)
@@ -1498,9 +1511,17 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
             case KEY_B:
                 if (device_mode == DEVICE_MODE_SOCKET)
                 {
-                    if (!telnet_send_break(telnet_client(), device_fd))
+                    switch (telnet_send_break(telnet_client(), device_fd))
                     {
-                        device_serial_only("Sending break");
+                        case TELNET_REQUEST_UNAVAILABLE:
+                            device_serial_only("Sending break");
+                            break;
+                        case TELNET_REQUEST_FAILED:
+                            tio_warning_printf("Could not send the break request to the peer (%s)",
+                                    strerror(errno));
+                            break;
+                        case TELNET_REQUEST_SENT:
+                            break;
                     }
                     break;
                 }
@@ -3152,10 +3173,23 @@ void forward_to_device(int fd, char output_char)
                     {
                         if (device_mode == DEVICE_MODE_SOCKET)
                         {
-                            if (!telnet_send_break(telnet_client(), fd))
+                            switch (telnet_send_break(telnet_client(), fd))
                             {
-                                device_serial_only("ONULBRK");
-                                return;
+                                case TELNET_REQUEST_UNAVAILABLE:
+                                    device_serial_only("ONULBRK");
+                                    return;
+                                case TELNET_REQUEST_FAILED:
+                                    /* Warns and carries on, where the unavailable case
+                                     * above returns. The only difference either way is
+                                     * whether this NUL is counted as transmitted, since
+                                     * this function handles one character - and it was
+                                     * consumed rather than forwarded, so it is counted.
+                                     * The peer being gone is the read path's to report. */
+                                    tio_warning_printf("Could not send the break request to the peer (%s)",
+                                            strerror(errno));
+                                    break;
+                                case TELNET_REQUEST_SENT:
+                                    break;
                             }
                             status = 0;
                         }
