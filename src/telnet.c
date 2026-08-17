@@ -172,10 +172,18 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
     telnet->local_enabled[opt] = wanted;
     telnet->local_answered[opt] = true;
 
-    if (wanted && (opt == OPT_COM_PORT))
+    if (wanted && (opt == OPT_COM_PORT) && (telnet->role == TELNET_ROLE_CLIENT))
     {
         /* The option is live now, so the settings the user asked for on the
-         * command line can be carried to the remote port */
+         * command line can be carried to the remote port.
+         *
+         * Only from the client. These are requests - the command numbers without
+         * the server offset - and a server has no remote port to configure. This
+         * function serves both roles, so without the test a client sending the
+         * legal IAC DO COM-PORT made the server answer correctly and then send it
+         * a client's requests, which is a direction the protocol has no meaning
+         * in. A peer that negotiates both directions of an option sends exactly
+         * that; the harness's own test server opens with it. */
         telnet_send_port_settings(telnet, fd);
     }
 }
