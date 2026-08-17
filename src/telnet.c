@@ -227,6 +227,21 @@ static size_t append_value(unsigned char *out, size_t at, unsigned char value)
     return at;
 }
 
+/* Abandon a subnegotiation whose payload has overrun the buffer, and go back to reading
+ * data. Both ways into the overrun end here so that the recovery is expressed once. */
+static void subneg_abandon(telnet_t *telnet)
+{
+    telnet->subneg_overflow = true;
+    telnet->subneg_length = 0;
+    telnet->state = TELNET_STATE_DATA;
+
+    /* Bounded by construction: reaching here again costs the peer a fresh IAC SB and
+     * another full buffer, so the warning cannot be produced faster than once per 65
+     * bytes - and a stream desynchronised enough to do that repeatedly is already the
+     * louder problem. */
+    tio_warning_printf("Discarded an oversized subnegotiation from the peer");
+}
+
 /* Returns whether the whole message reached the peer. net_send_raw already refuses to
  * send a protocol message in part, so anything short of the full length is a delivery
  * failure rather than a partial write to resume. */
@@ -993,7 +1008,21 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                 }
                 else
                 {
-                    telnet->subneg_overflow = true;
+                    /* Give up on this subnegotiation rather than keep waiting for a
+                     * terminator.
+                     *
+                     * Waiting was unbounded: a peer that never sends IAC SE keeps this
+                     * state forever, and every byte after it is consumed as payload, so
+                     * the device's output stops arriving and nothing says why. The
+                     * subnegotiation is already unrecoverable at this point - the bytes
+                     * that would have been parsed are past the end of the buffer, so no
+                     * terminator can rescue it - which makes continuing to wait a way to
+                     * lose more for no possible gain.
+                     *
+                     * The cost of abandoning it is that the trailing payload shows up as
+                     * data, on a stream that is already desynchronised. That is bounded
+                     * and visible, where the alternative is neither. */
+                    subneg_abandon(telnet);
                 }
                 break;
 
@@ -1010,12 +1039,16 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                     if (telnet->subneg_length < sizeof(telnet->subneg))
                     {
                         telnet->subneg[telnet->subneg_length++] = byte;
+                        telnet->state = TELNET_STATE_SUBNEG;
                     }
                     else
                     {
-                        telnet->subneg_overflow = true;
+                        /* The escaped-byte path into the same overrun, so it takes the
+                         * same exit. Note this one must NOT fall through to
+                         * TELNET_STATE_SUBNEG afterwards, which is why the state
+                         * assignment moved inside the branch above. */
+                        subneg_abandon(telnet);
                     }
-                    telnet->state = TELNET_STATE_SUBNEG;
                 }
                 break;
         }
