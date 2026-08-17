@@ -272,7 +272,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Write byte by byte with output delay
         for (i=0; i<count; i++)
         {
-            retval = write(fd, buffer, 1);
+            retval = write(fd, (const char *)buffer + i, 1);
             if (retval < 0)
             {
                 // Error
@@ -281,7 +281,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
             }
             bytes_written += retval;
 
-            if (option.output_line_delay && *(unsigned char*)buffer == '\n')
+            if (option.output_line_delay && (*((const unsigned char *)buffer + i) == '\n'))
             {
                 delay(option.output_line_delay);
             }
