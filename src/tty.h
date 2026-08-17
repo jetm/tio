@@ -95,7 +95,11 @@ void tty_line_set(int fd, tty_line_config_t line_config[]);
 // device_sync() to put it on the wire. Maps in place, so the caller's buffer
 // must be writable and must not be shared.
 ssize_t device_write(int fd, const void *buffer, size_t count);
-void device_sync(int fd);
+
+// Put the buffered bytes on the wire. Returns false when some of them could not be
+// delivered, having said so; a caller with nothing to do about that may ignore it, but one
+// whose exit status reports success or failure to a script must not.
+bool device_sync(int fd);
 
 // Report an operation that only a serial line can carry out, when the session
 // is connected to a socket. Returns true when the caller must not proceed.
