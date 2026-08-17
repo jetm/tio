@@ -56,6 +56,12 @@ typedef struct
     unsigned char pending_command;
     bool engaged;
 
+    // Whether this side has offered the serial-port option itself. A client is
+    // otherwise purely reactive, which leaves it silent against a server that
+    // waits to be asked; the offer is only made once the peer has shown it
+    // speaks Telnet, so a raw peer is still never written to unasked.
+    bool com_port_offered;
+
     // Whether any data byte has arrived from the peer yet. A peer that sends
     // data before it ever negotiates is not speaking Telnet, so a command
     // marker after that point is a data byte rather than the start of a

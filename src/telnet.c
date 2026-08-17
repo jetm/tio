@@ -135,7 +135,12 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
         return;
     }
 
-    send_command(fd, wanted ? WILL : WONT, opt);
+    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_offered))
+    {
+        /* Skipped only when this is the peer agreeing to an offer already made
+         * from here: repeating it would be a second offer of the same option */
+        send_command(fd, wanted ? WILL : WONT, opt);
+    }
     telnet->local_enabled[opt] = wanted;
     telnet->local_answered[opt] = true;
 
@@ -612,6 +617,23 @@ static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsig
 
         default:
             break;
+    }
+
+    /* RFC 2217 has the client ask for the serial-port option and the server
+     * agree, but this client only ever answered, so a server that waits to be
+     * asked was met with silence: the option never came up, and a named baud
+     * rate, a break and the modem lines all quietly did nothing.
+     *
+     * Ask, but only after the peer has negotiated something - which is what
+     * this function handling an option means. Offering on connect instead would
+     * put three protocol bytes in front of a peer that speaks no protocol, and
+     * tio's own socket server forwards whatever it is sent straight to the
+     * serial device, so those bytes would land on somebody's console. */
+    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_offered
+            && !telnet->local_answered[OPT_COM_PORT])
+    {
+        telnet->com_port_offered = true;
+        send_command(fd, WILL, OPT_COM_PORT);
     }
 }
 
