@@ -59,29 +59,35 @@
 #define PURGE_TX   2
 #define PURGE_BOTH 3
 
-/* RFC 2217 SET-CONTROL values. A break is a pair rather than a duration: the
- * line is held and then released, so the length is the client's to decide. */
-#define CONTROL_FLOW_REQUEST 0
-#define CONTROL_FLOW_NONE    1
-#define CONTROL_FLOW_SOFT    2
-#define CONTROL_FLOW_HARD    3
-#define CONTROL_BREAK_ON  4
-#define CONTROL_BREAK_OFF 5
-#define CONTROL_DTR_ON    6
-#define CONTROL_DTR_OFF   7
-#define CONTROL_RTS_ON    8
-#define CONTROL_RTS_OFF   9
+/* RFC 2217 SET-CONTROL values, in the order the protocol assigns them. Each of
+ * the three things that can be driven has its own triple: ask what it is, set it
+ * on, set it off - and the ask comes FIRST in each triple. That is the trap. An
+ * earlier version of this table began at break-on, so every value from four up
+ * was read as the command one above it: asking what the break state was sent a
+ * real break, asking about DTR dropped it, and setting DTR drove RTS. */
+#define CONTROL_FLOW_REQUEST     0
+#define CONTROL_FLOW_NONE        1
+#define CONTROL_FLOW_SOFT        2
+#define CONTROL_FLOW_HARD        3
+#define CONTROL_BREAK_REQUEST    4
+#define CONTROL_BREAK_ON         5
+#define CONTROL_BREAK_OFF        6
+#define CONTROL_DTR_REQUEST      7
+#define CONTROL_DTR_ON           8
+#define CONTROL_DTR_OFF          9
+#define CONTROL_RTS_REQUEST     10
+#define CONTROL_RTS_ON          11
+#define CONTROL_RTS_OFF         12
+#define CONTROL_FLOW_IN_REQUEST 13
+#define CONTROL_FLOW_IN_NONE    14
+#define CONTROL_FLOW_IN_SOFT    15
+#define CONTROL_FLOW_IN_HARD    16
 
-/* Inbound flow control repeats the outbound values ten higher, and the three
- * request-the-current-state values sit above those */
-#define CONTROL_FLOW_IN_REQUEST 10
-#define CONTROL_FLOW_IN_NONE    11
-#define CONTROL_FLOW_IN_SOFT    12
-#define CONTROL_FLOW_IN_HARD    13
-#define CONTROL_FLOW_IN_OFFSET  10
-#define CONTROL_BREAK_REQUEST   14
-#define CONTROL_DTR_REQUEST     15
-#define CONTROL_RTS_REQUEST     16
+/* Flow control keyed off a modem line. Not offered, and answered as no flow
+ * control rather than echoed, so a client is not told a mode was adopted. */
+#define CONTROL_DCD_FLOW        17
+#define CONTROL_DTR_FLOW        18
+#define CONTROL_DSR_FLOW        19
 
 /* Matches what tcsendbreak sends for a zero duration, so a break behaves the
  * same whether the port is local or at the far end of a socket */
@@ -454,51 +460,121 @@ static parity_t parity_from_value(unsigned char value)
  * which is the requested one only when the device could take it. Answering
  * with the request instead would tell the client a device it cannot see is
  * configured in a way it is not. */
-/* What to answer a SET-CONTROL request with. The protocol asks for the state the
- * port is in, not an echo of the request, and it groups three separate things
- * behind one command: flow control, the break, and the two modem lines. Each
- * has its own value space, and the request identifies which one is being asked
- * about even when the port cannot do what was asked. */
-static unsigned char control_state(unsigned char request)
+/* Which of the things behind SET-CONTROL a request is about. One command covers
+ * flow control in each direction, the break, and the two modem lines, and each
+ * has its own values.
+ *
+ * Deciding the group once is the point. Acting on a request and answering it used
+ * to switch on the value separately, and when the value table was wrong both
+ * switches were wrong in the same way - so the reply agreed with the action and a
+ * client asking for DTR was told DTR while RTS moved. One classification cannot
+ * disagree with itself. */
+typedef enum
+{
+    CONTROL_GROUP_FLOW_OUT,
+    CONTROL_GROUP_FLOW_IN,
+    CONTROL_GROUP_BREAK,
+    CONTROL_GROUP_DTR,
+    CONTROL_GROUP_RTS,
+    CONTROL_GROUP_UNSUPPORTED,
+} control_group_t;
+
+static control_group_t control_group(unsigned char request)
 {
     switch (request)
     {
-        /* Outbound flow control. A client cannot change it here, so the answer
-         * is what the port was configured with rather than what was asked. */
         case CONTROL_FLOW_REQUEST:
         case CONTROL_FLOW_NONE:
         case CONTROL_FLOW_SOFT:
         case CONTROL_FLOW_HARD:
-            return (unsigned char) tty_flow_control_value();
+            return CONTROL_GROUP_FLOW_OUT;
 
-        /* Inbound flow control is the same three answers in its own range */
         case CONTROL_FLOW_IN_REQUEST:
         case CONTROL_FLOW_IN_NONE:
         case CONTROL_FLOW_IN_SOFT:
         case CONTROL_FLOW_IN_HARD:
-            return (unsigned char) (tty_flow_control_value() + CONTROL_FLOW_IN_OFFSET);
+            return CONTROL_GROUP_FLOW_IN;
 
-        /* The break is a pulse rather than a state that is held, so by the time
-         * this answers the line has already been released */
+        case CONTROL_BREAK_REQUEST:
         case CONTROL_BREAK_ON:
         case CONTROL_BREAK_OFF:
-        case CONTROL_BREAK_REQUEST:
-            return CONTROL_BREAK_OFF;
+            return CONTROL_GROUP_BREAK;
+
+        case CONTROL_DTR_REQUEST:
+        case CONTROL_DTR_ON:
+        case CONTROL_DTR_OFF:
+            return CONTROL_GROUP_DTR;
+
+        case CONTROL_RTS_REQUEST:
+        case CONTROL_RTS_ON:
+        case CONTROL_RTS_OFF:
+            return CONTROL_GROUP_RTS;
+
+        default:
+            return CONTROL_GROUP_UNSUPPORTED;
+    }
+}
+
+/* Carry out a request. Only the set values do anything: a request value asks
+ * what the state is and must leave it alone, which is what makes reading the
+ * table correctly load-bearing rather than cosmetic. */
+static void control_apply(unsigned char request)
+{
+    switch (request)
+    {
+        case CONTROL_BREAK_ON:
+            tty_apply_break();
+            break;
 
         case CONTROL_DTR_ON:
         case CONTROL_DTR_OFF:
-        case CONTROL_DTR_REQUEST:
-            return tty_dtr_asserted() ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
+            tty_apply_dtr(request == CONTROL_DTR_ON);
+            break;
 
         case CONTROL_RTS_ON:
         case CONTROL_RTS_OFF:
-        case CONTROL_RTS_REQUEST:
-            return tty_rts_asserted() ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
+            tty_apply_rts(request == CONTROL_RTS_ON);
+            break;
 
         default:
-            /* Nothing known about it, so say back what was asked rather than
-             * inventing a state for something this does not understand */
-            return request;
+            /* Break-off needs nothing, since the break already released the
+             * line; flow control is not offered; and every request value is a
+             * question rather than an instruction. */
+            break;
+    }
+}
+
+/* What to answer with: the state the port is in, not an echo of the request. */
+static unsigned char control_state(unsigned char request)
+{
+    switch (control_group(request))
+    {
+        case CONTROL_GROUP_FLOW_OUT:
+            /* A client cannot change it here, so the answer is what the port was
+             * configured with rather than what was asked for. */
+            return (unsigned char) tty_flow_control_value();
+
+        case CONTROL_GROUP_FLOW_IN:
+            /* The same three answers, in the inbound range */
+            return (unsigned char) (CONTROL_FLOW_IN_REQUEST + tty_flow_control_value());
+
+        case CONTROL_GROUP_BREAK:
+            /* The break is a pulse rather than a state that is held, so by the
+             * time this answers the line has already been released */
+            return CONTROL_BREAK_OFF;
+
+        case CONTROL_GROUP_DTR:
+            return tty_dtr_asserted() ? CONTROL_DTR_ON : CONTROL_DTR_OFF;
+
+        case CONTROL_GROUP_RTS:
+            return tty_rts_asserted() ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
+
+        case CONTROL_GROUP_UNSUPPORTED:
+        default:
+            /* Flow control keyed off a modem line, which this does not do.
+             * Echoing the request back would tell the client the mode was
+             * adopted; saying no flow control is the truth. */
+            return CONTROL_FLOW_NONE;
     }
 }
 
@@ -579,27 +655,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
             {
                 unsigned char request = telnet->subneg[2];
 
-                switch (request)
-                {
-                    case CONTROL_BREAK_ON:
-                        tty_apply_break();
-                        break;
-
-                    case CONTROL_DTR_ON:
-                    case CONTROL_DTR_OFF:
-                        tty_apply_dtr(request == CONTROL_DTR_ON);
-                        break;
-
-                    case CONTROL_RTS_ON:
-                    case CONTROL_RTS_OFF:
-                        tty_apply_rts(request == CONTROL_RTS_ON);
-                        break;
-
-                    default:
-                        /* Break-off needs nothing, since the break already
-                         * released the line, and flow control is not offered */
-                        break;
-                }
+                control_apply(request);
 
                 /* Answer it. Every other setting command reports the value the
                  * port ended up at and this one reported nothing, which is not
