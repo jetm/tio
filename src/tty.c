@@ -1324,6 +1324,25 @@ void tty_configure(void)
             exit(EXIT_FAILURE);
         }
     }
+    else
+    {
+        /* An arbitrary rate travels via setspeed() rather than these bits, but the bits
+         * still get written to the port first - and left at zero they say B0, which is a
+         * request to hang the line up. Traced at connect on a rate of 12345 the port went
+         * B0, was read back as B0, and only then reached BOTHER: a window in which the
+         * modem control lines are de-asserted. On an adapter whose DTR or RTS drives reset
+         * or bootloader entry, that window resets the board every time tio connects at a
+         * rate with no termios constant.
+         *
+         * Any non-zero rate closes it, so this seeds a placeholder that setspeed()
+         * immediately replaces. The value is not applied to anything for long enough to
+         * matter; what matters is that it is not a hang-up. */
+        if ((cfsetispeed(&tio, B38400) == -1) || (cfsetospeed(&tio, B38400) == -1))
+        {
+            tio_error_printf("Could not configure placeholder speed (%s)", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+    }
 
     /* Set databits */
     tio.c_cflag &= ~CSIZE;
