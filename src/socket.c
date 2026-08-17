@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "socket.h"
+#include "net.h"
 #include "options.h"
 #include "print.h"
 #include "telnet.h"
@@ -297,11 +298,14 @@ void socket_write(char input_char)
                 length = 2;
             }
 
-#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-            if (send(clientfds[i], buffer, length, 0) <= 0)
-#else
-            if (send(clientfds[i], buffer, length, MSG_NOSIGNAL) <= 0)
-#endif
+            /* Send all of it, and treat a partial send as the failure it is.
+             * This used to write one byte, where a short send was impossible and
+             * checking for non-positive was a complete test. Doubling the marker
+             * made it two, and a return of one then took neither the error path
+             * nor a retry: the second marker was dropped, and the client read the
+             * surviving one as the start of a command and ate the device byte
+             * after it - desynchronised for the rest of the session. */
+            if (net_send_raw(clientfds[i], buffer, length) != (ssize_t) length)
             {
                 tio_error_printf_silent("Failed to write to socket (%s)", strerror(errno));
                 close(clientfds[i]);
