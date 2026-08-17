@@ -569,6 +569,26 @@ bool device_serial_only(const char *operation)
     return true;
 }
 
+bool device_escaping(const char *operation)
+{
+    if ((device_mode != DEVICE_MODE_SOCKET) || !telnet_engaged(telnet_client()))
+    {
+        return false;
+    }
+
+    /* An operation that hands the connection's descriptor to something outside this
+     * program cannot be escaped on the way out, because nothing tio owns sees those
+     * bytes. execute_shell_command dup2s the descriptor onto a child's stdout, so a
+     * child emitting a byte equal to the command marker puts a bare marker on a session
+     * where a bare marker means a command - corrupting the stream rather than the
+     * output. Refusing is not a limitation of sockets: on a plain socket, and on a tty,
+     * there is no escaping to bypass and the operation is allowed. */
+    tio_warning_printf("%s writes straight to the connection, which would put unescaped bytes on an RFC 2217 session",
+            operation);
+
+    return true;
+}
+
 static const char *tty_line_name(int mask)
 {
     switch (mask)
@@ -1649,6 +1669,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 
             case KEY_SHIFT_R:
                 /* Execute shell command */
+                if (device_escaping("Executing a shell command redirected to the device"))
+                {
+                    break;
+                }
                 tio_printf("Execute shell command with I/O redirected to device");
                 tio_printf_raw("Enter command: ");
                 if (tio_readln())
@@ -3478,6 +3502,10 @@ int device_connect(void)
 
     if (option.exec != NULL)
     {
+        if (device_escaping("--exec"))
+        {
+            exit(EXIT_FAILURE);
+        }
         status = execute_shell_command(device_fd, option.exec);
         exit(status);
     }

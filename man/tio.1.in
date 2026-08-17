@@ -440,6 +440,11 @@ Default value is "always".
 
 Execute shell command with I/O redirected to device
 
+The command's output goes to the connection directly, so tio cannot escape it. On
+a socket session speaking RFC 2217 the option is refused: a byte equal to the
+Telnet command marker would reach the peer bare, where it introduces a command
+rather than carrying data. A serial device and a plain socket are unaffected.
+
 .TP
 .BR "\-\-complete-profiles
 

@@ -105,6 +105,12 @@ bool device_sync(int fd);
 // is connected to a socket. Returns true when the caller must not proceed.
 bool device_serial_only(const char *operation);
 
+// Report an operation that would hand the connection's descriptor to something
+// outside tio, when the session escapes its output. Returns true when the caller must
+// not proceed. Distinct from device_serial_only: this refuses on an escaping socket
+// only, and allows what a plain socket can carry perfectly well.
+bool device_escaping(const char *operation);
+
 // Apply a setting a socket client asked for to the device being served, and
 // return what is in effect afterwards. That differs from the request when the
 // device could not take it, which is what the caller has to answer with.
