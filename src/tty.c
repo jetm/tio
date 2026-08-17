@@ -2763,6 +2763,24 @@ int tty_connect(void)
         if (status > 0)
         {
             bool forward = false;
+
+            /* Every ready descriptor is serviced, not just the first of them.
+             *
+             * These three used to be one if/else-if/else chain, so exactly one ran per
+             * iteration and the device always won it. While the device had bytes waiting
+             * the socket was never looked at: no client accepted, no client read, and
+             * traced against a continuously producing device the server made zero accept
+             * calls for the whole run while a client sat in the backlog. stdin starved the
+             * same way, which is why ctrl-t q kept working during a flood and every other
+             * command did not - quit is handled in the input thread, ahead of this loop.
+             *
+             * Each branch is self-contained: the device branch consumes and prints,
+             * socket_handle_input tests its own descriptors and does nothing when none is
+             * ready, and forward/output_char are assigned before use inside whichever
+             * branch uses them. So running them in sequence is the same work in the same
+             * order, minus the starvation. A read error still leaves via error_read and
+             * skips the rest of the iteration, which is correct - the session is going
+             * down. */
             if (FD_ISSET(device_fd, &rdfs))
             {
                 /*******************************/
@@ -2945,7 +2963,7 @@ int tty_connect(void)
                     }
                 }
             }
-            else if (FD_ISSET(pipefd[0], &rdfs))
+            if (FD_ISSET(pipefd[0], &rdfs))
             {
                 /**************************/
                 /* Input from stdin ready */
@@ -3027,7 +3045,10 @@ int tty_connect(void)
 
                 tty_sync(device_fd);
             }
-            else
+            /* Unconditional, because socket_handle_input tests its own descriptors and
+             * returns at once when the socket option is off or nothing is ready. A
+             * FD_ISSET here would have to name the listening socket and every client
+             * separately - the same list the function already walks. */
             {
                 /***************************/
                 /* Input from socket ready */
