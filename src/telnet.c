@@ -693,10 +693,21 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                  * for it during open - so leaving it unimplemented stopped the
                  * session getting established at all, the same way an
                  * unanswered control request did. */
-                tty_apply_purge((what == PURGE_RX) || (what == PURGE_BOTH),
-                        (what == PURGE_TX) || (what == PURGE_BOTH));
+                bool input = (what == PURGE_RX) || (what == PURGE_BOTH);
+                bool output = (what == PURGE_TX) || (what == PURGE_BOTH);
+                unsigned char done = 0;
 
-                values[0] = what;
+                if (tty_apply_purge(input, output))
+                {
+                    done = what;
+                }
+
+                /* Answer with what was discarded, not with what was asked for.
+                 * Every other command in this switch reports the value the port
+                 * ended up at; echoing the request told a client that sent an
+                 * undefined value - or one whose flush failed - that it had been
+                 * carried out. */
+                values[0] = done;
                 send_subneg(fd, COM_PURGE_DATA + SERVER_OFFSET, values, 1);
             }
             break;

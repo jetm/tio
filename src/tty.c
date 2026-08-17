@@ -956,13 +956,13 @@ bool tty_rts_asserted(void)
     return tty_line_asserted(TIOCM_RTS);
 }
 
-void tty_apply_purge(bool input, bool output)
+bool tty_apply_purge(bool input, bool output)
 {
     int queue;
 
     if (!tty_serving_device())
     {
-        return;
+        return false;
     }
 
     if (input && output)
@@ -979,13 +979,16 @@ void tty_apply_purge(bool input, bool output)
     }
     else
     {
-        return;
+        return false;
     }
 
     if (tcflush(device_fd, queue) < 0)
     {
         tio_warning_printf("Could not discard buffered data (%s)", strerror(errno));
+        return false;
     }
+
+    return true;
 }
 
 /* A socket carries no line state to read back, so what was last asked for is
