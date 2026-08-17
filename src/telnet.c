@@ -941,13 +941,23 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
     return kept;
 }
 
-ssize_t telnet_send(int fd, const void *buffer, size_t count)
+ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t count)
 {
     const unsigned char *input = (const unsigned char *) buffer;
     unsigned char escaped[2 * BUFSIZ];
     size_t consumed = 0;
     size_t produced = 0;
     size_t sent = 0;
+
+    if (!telnet_engaged(telnet))
+    {
+        /* Not a Telnet peer, so a byte equal to the command marker is a byte.
+         * Deciding that here rather than at the call sites is the point: the rule
+         * was implemented twice, once here and once inline for the server, and
+         * two encodings of one rule are what let the read and write sides drift
+         * apart before. */
+        return net_send_raw(fd, buffer, count);
+    }
 
     /* Stop short of the caller's buffer rather than overrun ours; the caller
      * writes what is left on the next call */

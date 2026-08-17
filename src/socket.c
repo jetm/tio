@@ -302,25 +302,18 @@ void socket_write(char input_char)
         {
             /* Only a client that negotiated is written to as a Telnet peer.
              * The rest receive the device's bytes and nothing else, which is
-             * what every existing consumer of this socket expects. */
-            char buffer[2];
-            size_t length = 1;
-
-            buffer[0] = input_char;
-            if (telnet_engaged(&clienttelnet[i]) && (input_char == (char) 0xff))
-            {
-                buffer[1] = input_char;
-                length = 2;
-            }
-
-            /* Send all of it, and treat a partial send as the failure it is.
-             * This used to write one byte, where a short send was impossible and
-             * checking for non-positive was a complete test. Doubling the marker
-             * made it two, and a return of one then took neither the error path
-             * nor a retry: the second marker was dropped, and the client read the
-             * surviving one as the start of a command and ate the device byte
-             * after it - desynchronised for the rest of the session. */
-            if (net_send_raw(clientfds[i], buffer, length) != (ssize_t) length)
+             * what every existing consumer of this socket expects - and
+             * telnet_send() reads that from the client's own context, so the
+             * doubling rule lives in one place rather than being spelled out
+             * again here.
+             *
+             * The return is the caller's byte count, not the wire's, so one is
+             * success whether the marker was doubled or not. Testing the wire
+             * length was how a doubled marker sent as one byte took neither the
+             * error path nor a retry: the second marker was dropped, and the
+             * client read the surviving one as the start of a command and ate the
+             * device byte after it - desynchronised for the rest of the session. */
+            if (telnet_send(&clienttelnet[i], clientfds[i], &input_char, 1) != 1)
             {
                 tio_error_printf_silent("Failed to write to socket (%s)", strerror(errno));
                 close(clientfds[i]);

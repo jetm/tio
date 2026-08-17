@@ -157,8 +157,9 @@ bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_l
 // stream rather than a failure.
 void telnet_send_port_settings(telnet_t *telnet, int fd);
 
-// Write to a peer that speaks Telnet, doubling the command marker so that a
-// data byte equal to it is not read as the start of a command. Returns the
-// number of bytes of the caller's buffer that were sent, not the number of
-// bytes that went out on the wire.
-ssize_t telnet_send(int fd, const void *buffer, size_t count);
+// Write to a peer, doubling the command marker so that a data byte equal to it is
+// not read as the start of a command. A peer that has not negotiated gets the
+// bytes unaltered, so this is safe to call for any peer and is the only place the
+// doubling rule is expressed. Returns the number of bytes of the caller's buffer
+// that were sent, not the number of bytes that went out on the wire.
+ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t count);
