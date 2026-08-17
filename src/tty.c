@@ -1449,6 +1449,14 @@ void tty_reconfigure(void)
     {
         /* Activate new port settings */
         tcsetattr(device_fd, TCSANOW, &tio);
+
+        if (!standard_baudrate)
+        {
+            /* An arbitrary rate does not travel through termios, so without
+             * this the structure is restored while the line stays at whatever
+             * tcsetattr made of a speed field it had no constant for */
+            setspeed(device_fd, option.baudrate);
+        }
     }
 }
 
