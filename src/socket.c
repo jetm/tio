@@ -38,7 +38,6 @@
 #include "tty.h"
 
 #define MAX_SOCKET_CLIENTS 16
-#define SOCKET_PORT_DEFAULT 3333
 
 static int sockfd;
 static int clientfds[MAX_SOCKET_CLIENTS];
@@ -48,7 +47,7 @@ static int clientfds[MAX_SOCKET_CLIENTS];
  * first decide what the second receives */
 static telnet_t clienttelnet[MAX_SOCKET_CLIENTS];
 static int socket_family = AF_UNSPEC;
-static int port_number = SOCKET_PORT_DEFAULT;
+static int port_number = NET_PORT_DEFAULT;
 
 static int socket_client_count(void)
 {
@@ -71,26 +70,40 @@ static const char *socket_filename(void)
     return option.socket + 5;
 }
 
+/* Through net_parse_port, not atoi. This is the same option syntax the client side
+ * parses, and it already had a parser that validates; atoi() reports nothing, so
+ * `--socket inet:htpp` listened on 3333, `inet:99999` announced 99999 and listened on
+ * 34463 once the 16-bit port field cut its high bits off, and `inet:8080x` quietly became
+ * 8080. Announcing a port it is not listening on is the worst of the three, because the
+ * operator's own evidence is then the thing misleading them.
+ *
+ * An ABSENT port is not one of those, and it is handled here rather than in the parser
+ * because the two callers mean different things by "empty". For the server the port is the
+ * whole remainder of the option, so nothing there means no port was given, which
+ * tio.1 documents as the default: `--socket inet:` has listened on 3333 for as long as the
+ * option has existed. The client only reaches the parser with text that followed a colon,
+ * where empty means a colon was typed with nothing behind it and an error is right. Putting
+ * the default in the parser would make it substitute one for `inet:host:` too. */
+static int socket_port_or_default(const char *remainder)
+{
+    if (remainder[0] == '\0')
+    {
+        return NET_PORT_DEFAULT;
+    }
+
+    return (int) net_parse_port(remainder, option.socket);
+}
+
 static int socket_inet_port(void)
 {
     /* skip 'inet:' */
-    int port = atoi(option.socket + 5);
-    if (port == 0)
-    {
-        port = SOCKET_PORT_DEFAULT;
-    }
-    return port;
+    return socket_port_or_default(option.socket + 5);
 }
 
 static int socket_inet6_port(void)
 {
     /* skip 'inet6:' */
-    int port = atoi(option.socket + 6);
-    if (port == 0)
-    {
-        port = SOCKET_PORT_DEFAULT;
-    }
-    return port;
+    return socket_port_or_default(option.socket + 6);
 }
 
 static void socket_exit(void)

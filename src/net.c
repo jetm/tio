@@ -34,7 +34,6 @@
 #include "print.h"
 #include "telnet.h"
 
-#define NET_PORT_DEFAULT 3333
 #define NET_PORT_MAX 65535
 
 // Target prefixes which select socket mode instead of tty mode
@@ -68,7 +67,7 @@ bool net_target_is_socket(const char *target)
     return false;
 }
 
-static long net_parse_port(const char *port_string, const char *target)
+long net_parse_port(const char *port_string, const char *target)
 {
     char *endptr;
     long port;
