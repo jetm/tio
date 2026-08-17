@@ -829,7 +829,19 @@ parity_t tty_apply_parity(parity_t parity)
  *
  * A quarter second is roughly one break's own duration, so a client sending them
  * back to back is slowed to the rate the line can carry rather than refused, and
- * a client using break as it is meant to be used never notices. */
+ * a client using break as it is meant to be used never notices.
+ *
+ * devtool-debt: the interval is a judgement, not a measurement, and it bounds a
+ * burst rather than a duty cycle. tcsendbreak(fd, 0) asserts for an
+ * implementation-defined 0.25 to 0.5 seconds, and the interval is timed from the
+ * START of the previous break, so a client pacing its requests just over the
+ * interval gets every one of them and can hold the line in break more or less
+ * continuously. What this does stop is the case that was measured - a stream of
+ * NULs arriving inside one window, 40 requests reduced to one break.
+ * Ceiling: bursts faster than the interval. It does NOT bound the duty cycle.
+ * Upgrade trigger: a break receiver on the bench, which would give the platform's
+ * real break duration and let the interval be set against it rather than guessed;
+ * or a report of a line held in break by a paced client. */
 #define BREAK_MIN_INTERVAL_MS 250
 
 void tty_apply_break(void)
