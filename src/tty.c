@@ -2457,11 +2457,30 @@ void device_wait(void)
     struct timeval tv;
     static char input_char;
     static bool first = true;
+    static bool first_pass = true;
     static int last_errno = 0;
 
     /* Loop until device pops up */
     while (true)
     {
+        if (!interactive_mode)
+        {
+            /* One pacing point for every way out of this loop, because none of
+             * the tests below proves a peer or device is actually there: a host
+             * and port have no file to test, a unix socket file outlives the
+             * server that created it, and a tty node can exist while still
+             * refusing to open. Each of those returns to a connect attempt that
+             * can fail at once, and an unpaced one of those is a spin. The
+             * stale-socket case was exactly that - access(F_OK) succeeded on a
+             * file whose server had died without unlinking it. Interactive mode
+             * is paced by the select() timeout below instead. */
+            if (!first_pass)
+            {
+                sleep(1);
+            }
+            first_pass = false;
+        }
+
         tty_search();
 
         if (interactive_mode)
@@ -2534,8 +2553,6 @@ void device_wait(void)
 
         if (device_mode == DEVICE_MODE_SOCKET)
         {
-            static bool socket_first_attempt = true;
-
             probe_path = net_socket_path();
             probe_mode = F_OK;
 
@@ -2544,15 +2561,6 @@ void device_wait(void)
                 /* A host and port have no file to test, so the connection
                  * attempt itself is the availability test. Probing the
                  * filesystem here would never pass and would wait forever. */
-                if (!interactive_mode && !socket_first_attempt)
-                {
-                    /* Pace retries as the device path below does. The
-                     * interactive path is already paced by the select()
-                     * timeout above. */
-                    sleep(1);
-                }
-                socket_first_attempt = false;
-
                 last_errno = 0;
                 return;
             }
@@ -2570,14 +2578,6 @@ void device_wait(void)
             tio_warning_printf("Could not open %s (%s)", probe_path, strerror(errno));
             tio_printf("Waiting for device..");
             last_errno = errno;
-        }
-
-        if (!interactive_mode)
-        {
-            /* In non-interactive mode we do not need to handle input key
-             * commands so we simply sleep 1 second between checking for
-             * presence of the device */
-            sleep(1);
         }
     }
 }
