@@ -418,6 +418,44 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
         }
 #endif
 
+        /* Outside the SO_NOSIGPIPE guard above: that one is a platform detail, this one
+         * applies everywhere. Nesting it inside was worth catching - it would have left
+         * the stall unbounded on exactly the platforms that define MSG_NOSIGNAL, which is
+         * every Linux target. */
+        if (clientfd >= 0)
+        {
+            /* Bound how long this client can hold the device read path.
+             *
+             * socket_write() sends to every client from that path with a blocking send,
+             * so a client whose receive window has filled stops the whole server: the
+             * device goes unread, the other clients get nothing, and the serial port
+             * keeps producing into a buffer nobody drains. Measured without this, one
+             * client that simply never called recv starved a second, healthy client of
+             * every byte for eight seconds.
+             *
+             * A send timeout turns that unbounded wait into a bounded one, and
+             * net_send_raw's retry budget turns a repeatedly-timing-out send into a
+             * failure that socket_write already knows how to handle - it drops the
+             * client. The two are one mechanism: the timeout alone would be retried
+             * forever, and the budget alone has nothing to count.
+             *
+             * SEND_TIMEOUT_MS times SEND_MAX_STALLED is the worst case a stalled client
+             * can cost everyone else, once, before it is shed. */
+            struct timeval sndtimeo = {
+                .tv_sec = SEND_TIMEOUT_MS / 1000,
+                .tv_usec = (SEND_TIMEOUT_MS % 1000) * 1000,
+            };
+
+            if (setsockopt(clientfd, SOL_SOCKET, SO_SNDTIMEO, &sndtimeo, sizeof(sndtimeo)))
+            {
+                /* Not fatal: without it this client can still stall the others, which is
+                 * the behaviour that shipped before. Worth saying so rather than leaving
+                 * the operator to infer it from a hang. */
+                tio_warning_printf("Could not bound this client's send timeout (%s); a client that stops reading can stall the session",
+                        strerror(errno));
+            }
+        }
+
         if (option.socket_rfc2217 && socket_client_count() > 0)
         {
             /* One client at a time when the port is configurable. The serial
@@ -481,7 +519,28 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
              * has always been, in both directions, and a client cannot reach the
              * serial port's configuration by sending bytes that happen to look
              * like protocol. */
-            if (telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1) == 0)
+            size_t kept = telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1);
+
+            /* Answering this client happens inside the filter above, from this read path, so
+             * a client that cannot take its own answers is discovered here and nowhere else.
+             * Drop it, beside the read-error close a few lines up.
+             *
+             * Without this the send timeout bounded each answer and nothing ended the
+             * sequence: a peer with a floored receive buffer that never reads and streams
+             * SET-BAUDRATE requests spent the server's whole budget per answer, stayed
+             * connected, and did it again - measured at 1,331,986 requests with the peer
+             * still attached. Under --socket-rfc2217 it also holds the only slot while doing
+             * it, so there is no second client left to notice. */
+            if (telnet_write_failed(&clienttelnet[i]))
+            {
+                tio_error_printf_silent("Could not answer socket client, dropping it (%s)",
+                        strerror(errno));
+                close(clientfds[i]);
+                clientfds[i] = -1;
+                return false;
+            }
+
+            if (kept == 0)
             {
                 return false;
             }

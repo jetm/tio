@@ -229,6 +229,12 @@ OPTIONS
 
               Sockets remain open while the serial port is disconnected, and writes will block.
 
+              A client that stops reading is disconnected rather than  allowed  to
+              stall  the  session. Serial input is written to each client from the
+              same loop that reads the port, so a client whose receive buffer  has
+              filled  would otherwise hold up the port and every other client with
+              it.
+
               Various socket types are supported using the following prefixes in the socket field:
 
               unix:<filename>     Unix Domain Socket (file)

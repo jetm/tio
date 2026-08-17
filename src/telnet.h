@@ -68,6 +68,13 @@ typedef struct
     unsigned char pending_command;
     bool engaged;
 
+    // A write to this peer could not be delivered. Recorded rather than returned because the
+    // negotiation and answer paths have no local remedy - the useful response to a peer that
+    // will not take its own answers is to stop having it, and only the code that owns the
+    // connection can do that. Set by send_command and send_subneg, read by the owner after
+    // telnet_filter_input returns; see telnet_write_failed().
+    bool write_failed;
+
     // Whether this side has already sent WILL for the serial-port option, and
     // whether it has already sent DO. Two flags rather than one, because they are
     // opposite commitments: WILL offers to provide the option, DO asks the peer to.
@@ -134,6 +141,13 @@ void telnet_server_offer(telnet_t *telnet, int fd);
 // context the user did not enable, so a session that was not asked to speak
 // Telnet cannot be talked into it by the bytes that arrive.
 bool telnet_engaged(const telnet_t *telnet);
+
+// Whether a write to this peer failed to be delivered. Check it after
+// telnet_filter_input(), beside the read-error handling: answering a peer happens from the
+// read path, so a peer that cannot take its answers is discovered there and nowhere else. A
+// caller that ignores this gets the send timeout's bound without its recovery, which lets
+// such a peer stall the device loop once per message for as long as it keeps asking.
+bool telnet_write_failed(const telnet_t *telnet);
 
 // True when the peer took the serial-port option, which is what decides
 // whether an operation needing a serial line can be carried to it at all

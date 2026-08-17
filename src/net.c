@@ -320,6 +320,7 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 {
     const char *at = (const char *) buffer;
     size_t sent = 0;
+    int stalled = SEND_MAX_STALLED;
 
     /* Send all of it. A protocol message is only meaningful whole: half a
      * subnegotiation leaves the peer waiting for a terminator that is never
@@ -342,9 +343,29 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 #endif
         if (status < 0)
         {
-            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
+            if (errno == EINTR)
             {
+                /* A signal, not the peer. Nothing was consumed and nothing is stalled, so
+                 * this does not spend the budget. */
                 continue;
+            }
+            if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
+            {
+                /* On a socket carrying SO_SNDTIMEO this is the timeout expiring, which
+                 * means the peer's window is still full. Retrying without a bound is what
+                 * made the timeout pointless: the send returned, the loop went straight
+                 * back in, and the device read path stayed blocked exactly as long as if
+                 * there had been no timeout at all.
+                 *
+                 * Budget spent per stall and restored by any progress, so a slow peer that
+                 * keeps taking bytes is never dropped and one that has stopped taking them
+                 * is. A socket with no send timeout never arrives here, so this changes
+                 * nothing for the client side, which sends on a plainly blocking socket. */
+                if (--stalled > 0)
+                {
+                    continue;
+                }
+                return (sent > 0) ? (ssize_t) sent : status;
             }
             /* Report the error only when none of it went out; otherwise report
                what did, so a caller that checks can see the shortfall. */
@@ -355,6 +376,11 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
             break;
         }
         sent += (size_t) status;
+        /* Any progress restores the budget, so it bounds a peer that has STOPPED taking
+         * bytes rather than one that is merely slow. Without this a long transfer to a
+         * slow reader accumulates stalls across the whole send and is eventually dropped
+         * for being slow, which is not the failure this guards against. */
+        stalled = SEND_MAX_STALLED;
     }
 
     return (ssize_t) sent;

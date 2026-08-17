@@ -75,6 +75,17 @@ int net_connect(void);
 // applying whatever the negotiated protocol requires on the way out
 ssize_t net_send(int fd, const void *buffer, size_t count);
 
+// How long a single send may stall on a socket that has a send timeout set, and how many
+// such stalls in a row are tolerated before the send is reported as failed. The two are
+// one mechanism and are defined together so that neither can be tuned without the other
+// in view: the timeout without the budget is retried forever, and the budget without the
+// timeout never counts anything because a blocking send does not return.
+//
+// Their product is the worst case that one client which has stopped reading can cost the
+// device read path, once, before the caller sheds it.
+#define SEND_TIMEOUT_MS   250
+#define SEND_MAX_STALLED  4
+
 // Write the bytes given and nothing else, for a caller that has already
 // applied that protocol and must not have it applied twice
 ssize_t net_send_raw(int fd, const void *buffer, size_t count);
