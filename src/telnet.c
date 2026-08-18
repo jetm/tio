@@ -393,35 +393,54 @@ void telnet_send_port_settings(telnet_t *telnet, int fd)
      * inbound check rejects it, and RFC 2217 reserves zero on all four setting
      * commands for "report the current value", so sending it would ask a
      * question rather than hang the far end up. */
+    /* Assigned only after send_subneg confirms delivery, in all four blocks below - a v11
+     * cold review found the cache advancing first, discarding the bool the way every
+     * pre-existing server call site once did (see the comment on send_subneg's declaration).
+     * A setting that never left the machine still set the cache to match what was asked for,
+     * so the guard above a later attempt at the same value saw no difference and never
+     * retried - silently, for the rest of the session. Measured: flood a client's send
+     * buffer so the natural once-only send fails, then force a second attempt with an
+     * unrelated keystroke (tty_reconfigure() calls this on every settings change in socket
+     * mode) once the buffer clears - the named rate never crossed the wire on either
+     * attempt. `telnet_set_line` and `telnet_send_break` already followed this rule; this
+     * function was the one place that did not. */
     if (option.baudrate_set && (telnet->requested_baudrate != option.baudrate))
     {
-        telnet->requested_baudrate = option.baudrate;
         values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
         values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
         values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
         values[3] = (unsigned char) ((unsigned int) option.baudrate);
-        send_subneg(telnet, fd, COM_SET_BAUDRATE, values, 4);
+        if (send_subneg(telnet, fd, COM_SET_BAUDRATE, values, 4))
+        {
+            telnet->requested_baudrate = option.baudrate;
+        }
     }
 
     if (option.databits_set && (telnet->requested_databits != option.databits))
     {
-        telnet->requested_databits = option.databits;
         values[0] = (unsigned char) option.databits;
-        send_subneg(telnet, fd, COM_SET_DATASIZE, values, 1);
+        if (send_subneg(telnet, fd, COM_SET_DATASIZE, values, 1))
+        {
+            telnet->requested_databits = option.databits;
+        }
     }
 
     if (option.parity_set && (telnet->requested_parity != parity_value(option.parity)))
     {
-        telnet->requested_parity = parity_value(option.parity);
-        values[0] = (unsigned char) telnet->requested_parity;
-        send_subneg(telnet, fd, COM_SET_PARITY, values, 1);
+        values[0] = (unsigned char) parity_value(option.parity);
+        if (send_subneg(telnet, fd, COM_SET_PARITY, values, 1))
+        {
+            telnet->requested_parity = values[0];
+        }
     }
 
     if (option.stopbits_set && (telnet->requested_stopbits != option.stopbits))
     {
-        telnet->requested_stopbits = option.stopbits;
         values[0] = (unsigned char) option.stopbits;
-        send_subneg(telnet, fd, COM_SET_STOPSIZE, values, 1);
+        if (send_subneg(telnet, fd, COM_SET_STOPSIZE, values, 1))
+        {
+            telnet->requested_stopbits = option.stopbits;
+        }
     }
 }
 
