@@ -279,15 +279,26 @@ bool device_sync(int fd)
         }
         if (count < 0)
         {
-            if (((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
+            /* Only the tty, and it is no longer true that the socket could not reach
+             * here blocking - a v11 cold review found that it can. net_send() now
+             * carries its own bounded retry against SO_SNDTIMEO, so EAGAIN out of it is
+             * not "no room yet", it is net_send_raw's verdict that the peer has stopped
+             * reading and the budget is spent. Retrying that here restarted the budget
+             * from the top on every poll cycle, which is the exact anti-pattern
+             * telnet_send's own comment describes refusing one level up - reintroduced
+             * here, one level down, because this loop was written before the socket
+             * had a bound to interact with. Measured before this guard: 119.2s and a
+             * failed write to exit, piping into a socket target whose peer never read;
+             * net_send_raw's own bound is ~1s. */
+            if ((device_mode == DEVICE_MODE_TTY)
+                    && ((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
                     && (--attempts > 0))
             {
                 /* A tty is opened non-blocking, so no room left in its transmit
                  * buffer is an ordinary outcome rather than a failure. Wait for
                  * the far end to take more and resume from where this stopped:
                  * returning here would drop the rest of a buffer the caller has
-                 * already been told was written. The socket is blocking, so this
-                 * branch belongs to the tty. */
+                 * already been told was written. */
                 struct pollfd fds = { .fd = fd, .events = POLLOUT, .revents = 0 };
                 poll(&fds, 1, FLUSH_POLL_MS);
                 continue;
@@ -3705,8 +3716,9 @@ int device_connect(void)
                      * treat it exactly as a failed read: the session reconnects.
                      *
                      * Checked here rather than left to the next read to report, even
-                     * though today it always would. The client socket carries no send
-                     * timeout, so net_send_raw can only fail on it for a real error - but
+                     * though today it always would. net_send_raw can fail on this socket
+                     * for a stalled peer as well as a real error, since net_connect() now
+                     * bounds the client's send the same way the server bounds its own - but
                      * that is a property of net_connect() in another file, and relying on
                      * it silently is how the read and write sides drift apart. Acting on
                      * the failure where it is visible also stops the rest of this

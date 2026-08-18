@@ -391,8 +391,10 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
                  *
                  * Budget spent per stall and restored by any progress, so a slow peer that
                  * keeps taking bytes is never dropped and one that has stopped taking them
-                 * is. A socket with no send timeout never arrives here, so this changes
-                 * nothing for the client side, which sends on a plainly blocking socket. */
+                  * is. The client socket carries this same timeout since net_connect() set
+                  * it, so this reaches both sides now - a v11 cold review caught three
+                  * comments elsewhere still describing the client as exempt, which it had
+                  * not been since the send timeout was added there. */
                 if (--stalled > 0)
                 {
                     continue;

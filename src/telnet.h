@@ -168,12 +168,14 @@ bool telnet_engaged(const telnet_t *telnet);
 // caller that ignores this gets the send timeout's bound without its recovery, which lets
 // such a peer stall the device loop once per message for as long as it keeps asking.
 //
-// All three callers check it, and that is deliberate rather than defensive on two of them.
-// Only the server's accepted sockets carry a send timeout, so on the client this can fire
-// only for a real error - but that is a fact about net_connect() in a different file, and a
-// caller that skips the check is betting on it. The bet would be lost silently the day a
-// timeout is added to the client socket, which is the kind of coupling this series has
-// already paid for once.
+// All three callers check it, and that is deliberate rather than defensive on all of them.
+// It used to be defensive on two: the client socket carried no send timeout, so this could
+// only fire there for a real error, and the comment said so - a fact about net_connect() in
+// a different file, bet on rather than enforced here. The bet was lost the day a timeout was
+// added to the client socket, and it was lost silently: a v11 cold review found three stale
+// copies of the same claim elsewhere before this one was corrected. The client's write path
+// (device_sync in tty.c) now depends on this flag being checked for exactly the reason this
+// paragraph used to warn about.
 bool telnet_write_failed(const telnet_t *telnet);
 
 // True when the peer took the serial-port option, which is what decides
