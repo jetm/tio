@@ -679,12 +679,43 @@ void tty_line_set(int fd, tty_line_config_t line_config[])
     }
 }
 
-/* Put the current settings on the served device and say whether it took them.
- * The test is what the device reports back against what was asked of it, not
- * merely that something changed: a rate the device cannot manage still moves
- * the control flags, to B0, which would otherwise read as success while the
- * line was in fact hung up. */
-static bool tty_settings_took_effect(void)
+/* What each kind of request is answerable for. A request verifies its own bits and
+ * no others, because the answer names one setting: a device is within its rights to
+ * drop hardware flow control and keep everything else, and verifying the whole set
+ * on every request would report that device as refusing every parity and data-bits
+ * change on the port as well. Worse than the wrong message, the caller then rolls
+ * the accepted setting back, so a client asking for a parity the port took ends up
+ * with neither its parity nor an honest reason.
+ *
+ * CMSPAR belongs in the parity set because it is the only thing separating mark
+ * from odd and space from even. It is a Linux extension that drivers are free to
+ * drop, and when one does, a mark request comes back reading as plain odd - which
+ * without this passes the comparison and answers the client that the port is at
+ * mark parity while the line runs odd. That is the false success this whole
+ * function exists to catch. Where the platform has no such bit at all the local
+ * definition keeps this compiling, and the request then reads as not taken, which
+ * is the truth.
+ *
+ * Flow control is the one that straddles both flag words: hardware flow lives in
+ * c_cflag with the framing bits, software flow in c_iflag. Verifying only c_cflag
+ * would let a software-flow request report success having checked nothing at all.
+ *
+ * The baud rate carries no flag bits of its own - it is verified by the speed
+ * readback below, which is also what catches a rate the device cannot manage
+ * silently landing on B0 and hanging the line up. */
+#define TTY_VERIFY_BAUDRATE      0
+#define TTY_VERIFY_DATABITS      CSIZE
+#define TTY_VERIFY_STOPBITS      CSTOPB
+#define TTY_VERIFY_PARITY        (PARENB | PARODD | CMSPAR)
+#define TTY_VERIFY_FLOW          CRTSCTS
+#define TTY_VERIFY_FLOW_INPUT    (IXON | IXOFF | IXANY)
+
+/* Put the current settings on the served device and say whether it took the one
+ * being asked about. The test is what the device reports back against what was
+ * asked of it, not merely that something changed: a rate the device cannot manage
+ * still moves the control flags, to B0, which would otherwise read as success while
+ * the line was in fact hung up. */
+static bool tty_settings_took_effect(tcflag_t verified, tcflag_t verified_input)
 {
     struct termios check;
 
@@ -714,23 +745,6 @@ static bool tty_settings_took_effect(void)
     {
         return false;
     }
-
-    /* CMSPAR belongs in the mask because it is the only thing separating mark
-     * from odd and space from even. It is a Linux extension that drivers are
-     * free to drop, and when one does, a mark request comes back reading as
-     * plain odd - which without this passes the comparison and answers the
-     * client that the port is at mark parity while the line runs odd. That is
-     * the false success this function exists to catch. Where the platform has
-     * no such bit at all the local definition keeps this compiling, and the
-     * request then reads as not taken, which is the truth. */
-    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR | CRTSCTS;
-
-    /* Flow control straddles the two flag words: hardware flow lives in c_cflag
-     * with the framing bits above, software flow in c_iflag, which nothing here
-     * used to read. Verifying only c_cflag would let a software-flow request
-     * report success without checking anything at all - the same false success
-     * the CMSPAR bit is in the mask to prevent, one word over. */
-    const tcflag_t verified_input = IXON | IXOFF | IXANY;
 
     return ((check.c_cflag & verified) == (tio.c_cflag & verified))
             && ((check.c_iflag & verified_input) == (tio.c_iflag & verified_input));
@@ -796,7 +810,7 @@ int tty_apply_baudrate(int baudrate)
     }
 
     option.baudrate = baudrate;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_BAUDRATE, 0))
     {
         option.baudrate = previous;
         tty_reconfigure();
@@ -817,7 +831,7 @@ int tty_apply_databits(int databits)
     }
 
     option.databits = databits;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_DATABITS, 0))
     {
         option.databits = previous;
         tty_reconfigure();
@@ -838,7 +852,7 @@ int tty_apply_stopbits(int stopbits)
     }
 
     option.stopbits = stopbits;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_STOPBITS, 0))
     {
         option.stopbits = previous;
         tty_reconfigure();
@@ -858,7 +872,7 @@ flow_t tty_apply_flow(flow_t flow)
     }
 
     option.flow = flow;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_FLOW, TTY_VERIFY_FLOW_INPUT))
     {
         option.flow = previous;
         tty_reconfigure();
@@ -878,7 +892,7 @@ parity_t tty_apply_parity(parity_t parity)
     }
 
     option.parity = parity;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_PARITY, 0))
     {
         option.parity = previous;
         tty_reconfigure();
