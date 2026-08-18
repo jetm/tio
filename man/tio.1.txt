@@ -184,7 +184,8 @@ OPTIONS
 
               OLTU        Map lowercase characters to uppercase on output
 
-              ONULBRK     Map nul (zero) to send break signal on output
+              ONULBRK     Map nul (zero) to send break signal on output. On a socket served by --socket this hands the break to any client that can reach the port: a NUL byte is data, so it needs no protocol, no
+                          negotiation and not --socket-rfc2217. Breaks arriving this way are rate limited like any other, but the door is open whenever this mapping is set.
 
               OIGNCR      Ignore CR on output
 
@@ -254,6 +255,10 @@ OPTIONS
               A client that takes the option can configure the served serial port over the socket - baud rate, framing, break and the DTR and RTS lines - in the same way tio itself does when connecting to a socket target. Each  request
               is answered with the setting the port ended up at, which is not the requested one when the port could not manage it.
 
+              That check reads the setting back from the port, so it holds for framing, parity, flow control and any baud rate the platform has a constant for. It does not hold for an arbitrary rate: those are set through a
+              platform helper that reports only whether it was accepted, and a driver that takes a rate it cannot actually generate is indistinguishable from one that can. A request for such a rate is answered as applied on
+              the strength of that helper alone.
+
               Without  this option the socket carries a raw byte stream and nothing is sent to a client unasked, which is the default and is what every existing client of --socket expects. The option is not offered by default because a
               client that does not speak Telnet has no way to tell an offer from device output.
 
@@ -269,9 +274,13 @@ OPTIONS
               command marker reaches it doubled. That is the cost of the option and the reason it is not the default.
 
               A socket set by --socket inet: or --socket inet6: is bound on every interface and asks nobody for a password. That is defensible while the socket carries bytes, because bytes are all a client can put on the line.   Offering
-              RFC 2217 over it is a different matter: any client that can reach the port can then set the baud rate, switch the flow control, drop DTR and assert a break on the attached board. A break on a Linux console is a SysRq key, and
+              RFC 2217 over it is a different matter: any client that can reach the port can then set the baud rate, switch the flow control, drop DTR and assert a break on the attached board, and discard whatever the port has queued in
+              either direction. A break on a Linux console is a SysRq key, and
               hardware flow control asked for on a board that does not drive CTS stops the console being written to at all - so the option is enough to wedge a line as well as to type on it. Prefer --socket unix:, which is protected by file
               permissions, or keep the port off any network the machine does not own.
+
+              Withholding --socket-rfc2217 does not by itself close the break. With --map ONULBRK set, a client's NUL byte asserts one with no protocol involved, so a deployment hardened by leaving the option off still hands
+              out the one operation on this list that reboots a Linux console. That mapping and this option are separate doors to it.
 
            --rfc2217
 
@@ -381,7 +390,8 @@ SOCKET TARGETS
        in a configuration file, is not sent: a configuration file describes how to open a local device, and a remote port belongs to whoever is already using it.  Attaching without naming a setting therefore leaves the port exactly  as
        it was found.
 
-       What  is  reported as set is what the server says it applied, which is not always what was asked for: a port that cannot manage a setting is reported as not having taken it. On a plain socket these settings have no effect, since
+       What  is  reported as set is what the server says it applied, which is not always what was asked for: a port that cannot manage a setting is reported as not having taken it. An arbitrary baud rate is the exception - see
+       --socket-rfc2217 for why a server cannot verify one - and is reported as applied whenever the remote platform accepted it. On a plain socket these settings have no effect, since
        the connection carries bytes rather than driving a line.
 
        A socket target reconnects on disconnect under the usual rules, so a session survives the far end restarting. Use --no-reconnect to exit instead.
