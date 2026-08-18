@@ -1132,6 +1132,14 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
 ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t count)
 {
     const unsigned char *input = (const unsigned char *) buffer;
+    /* Two bytes out per byte in, worst case, because every byte could be a marker.
+     *
+     * Sized against BUFSIZ rather than the caller's count so the bound is a property of
+     * this function rather than of whoever called it, and the loop below stops on the
+     * buffer as well as on the input. It is a 16 KB stack frame taken once per call, and
+     * socket_write() calls this per device byte - a stack-pointer adjustment with no
+     * memset, so it costs nothing to speak of, but worth knowing it is here before
+     * building with stack probing or shrinking a thread stack. */
     unsigned char escaped[2 * BUFSIZ];
     size_t consumed = 0;
     size_t produced = 0;
