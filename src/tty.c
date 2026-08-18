@@ -908,22 +908,28 @@ parity_t tty_apply_parity(parity_t parity)
  * and the option is reachable over an unauthenticated network socket. The
  * negotiation gate bounds who may ask, not how often.
  *
- * A quarter second is roughly one break's own duration, so a client sending them
- * back to back is slowed to the rate the line can carry rather than refused, and
- * a client using break as it is meant to be used never notices.
+ * The gap is required AFTER the break completes, and is at least as long as that
+ * break actually took. Both halves of that come from a measurement rather than a
+ * guess: on an FT232R here, tcsendbreak(fd, 0) holds the line 0.279 s (0.274-0.280
+ * over five calls, one break received per call, confirmed by reading it back on a
+ * TX-to-RX loopback with PARMRK set).
  *
- * devtool-debt: the interval is a judgement, not a measurement, and it bounds a
- * burst rather than a duty cycle. tcsendbreak(fd, 0) asserts for an
- * implementation-defined 0.25 to 0.5 seconds, and the interval is timed from the
- * START of the previous break, so a client pacing its requests just over the
- * interval gets every one of them and can hold the line in break more or less
- * continuously. What this does stop is the case that was measured - a stream of
- * NULs arriving inside one window, 40 requests reduced to one break.
- * Ceiling: bursts faster than the interval. It does NOT bound the duty cycle.
- * Upgrade trigger: a break receiver on the bench, which would give the platform's
- * real break duration and let the interval be set against it rather than guessed;
- * or a report of a line held in break by a paced client. */
-#define BREAK_MIN_INTERVAL_MS 250
+ * That number is what ruled out the previous shape. The interval used to be a flat
+ * 250 ms measured from the START of the previous break - shorter than the break
+ * itself, so a client pacing requests at the interval re-asserted while the line
+ * was still held and kept it in break continuously. A limit a compliant client can
+ * use to take the console away is the wrong limit.
+ *
+ * Timing the call rather than assuming a constant, because POSIX only promises
+ * "not less than 0.25 and not more than 0.5 seconds" for a zero duration, so a
+ * figure measured on one adapter cannot be hardcoded for every platform. Requiring
+ * a gap equal to the last break's own duration bounds the duty cycle at half
+ * wherever it runs, without knowing anything about the driver in advance.
+ *
+ * The floor still matters on a platform whose break is very short: without it, a
+ * driver asserting for 5 ms would permit a 200-per-second stream that is bounded in
+ * duty cycle and still floods the loop with syscalls. */
+#define BREAK_MIN_GAP_MS 250
 
 /* Deliberately takes no descriptor, and acts on device_fd.
  *
@@ -939,29 +945,37 @@ parity_t tty_apply_parity(parity_t parity)
  * no reason to touch it. */
 void tty_apply_break(void)
 {
-    static struct timespec last_break = { 0, 0 };
-    struct timespec now;
-    long elapsed_ms;
+    /* When the last break finished, and how long it held. Both are needed: the gap is
+     * measured from completion, and its size is the previous break's own duration. */
+    static struct timespec break_done = { 0, 0 };
+    static long break_took_ms = 0;
+    struct timespec now, after;
+    bool timed;
+    long idle_ms, required_ms;
 
     if (!tty_serving_device())
     {
         return;
     }
 
-    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
-    {
-        if ((last_break.tv_sec != 0) || (last_break.tv_nsec != 0))
-        {
-            elapsed_ms = ((now.tv_sec - last_break.tv_sec) * 1000L)
-                    + ((now.tv_nsec - last_break.tv_nsec) / 1000000L);
+    /* Read the clock before deciding anything, so `now` is either valid or known not to
+     * be. Folding this into the condition below left it uninitialised on a clock failure
+     * and still used it afterwards to measure the break. */
+    timed = (clock_gettime(CLOCK_MONOTONIC, &now) == 0);
 
-            if (elapsed_ms < BREAK_MIN_INTERVAL_MS)
-            {
-                tio_debug_printf("Ignoring a break requested %ld ms after the last one", elapsed_ms);
-                return;
-            }
+    if (timed && ((break_done.tv_sec != 0) || (break_done.tv_nsec != 0)))
+    {
+        idle_ms = ((now.tv_sec - break_done.tv_sec) * 1000L)
+                + ((now.tv_nsec - break_done.tv_nsec) / 1000000L);
+
+        required_ms = (break_took_ms > BREAK_MIN_GAP_MS) ? break_took_ms : BREAK_MIN_GAP_MS;
+
+        if (idle_ms < required_ms)
+        {
+            tio_debug_printf("Ignoring a break requested %ld ms after the last one ended, needs %ld",
+                    idle_ms, required_ms);
+            return;
         }
-        last_break = now;
     }
 
     if (tcsendbreak(device_fd, 0) < 0)
@@ -969,6 +983,17 @@ void tty_apply_break(void)
         /* Reported here rather than at each caller, so a break that could not be
          * sent is not silent on one path and diagnosed on another */
         tio_warning_printf("Could not send break to tty device (%s)", strerror(errno));
+    }
+
+    /* Timed around the call because tcsendbreak blocks for the duration of the break,
+     * so this is the line-hold time on whatever platform this is - not a constant that
+     * has to be right everywhere. Recorded even on failure: a call that failed slowly
+     * still cost the loop that time. */
+    if (timed && (clock_gettime(CLOCK_MONOTONIC, &after) == 0))
+    {
+        break_done = after;
+        break_took_ms = ((after.tv_sec - now.tv_sec) * 1000L)
+                + ((after.tv_nsec - now.tv_nsec) / 1000000L);
     }
 }
 
