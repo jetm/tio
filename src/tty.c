@@ -3668,6 +3668,22 @@ int device_connect(void)
                      * protocol leaves zero bytes and the loop below runs not
                      * at all, which is what should happen. */
                     bytes_read = telnet_filter_input(telnet_client(), device_fd, input_buffer, bytes_read);
+
+                    /* An answer that could not be delivered means this peer is gone, so
+                     * treat it exactly as a failed read: the session reconnects.
+                     *
+                     * Checked here rather than left to the next read to report, even
+                     * though today it always would. The client socket carries no send
+                     * timeout, so net_send_raw can only fail on it for a real error - but
+                     * that is a property of net_connect() in another file, and relying on
+                     * it silently is how the read and write sides drift apart. Acting on
+                     * the failure where it is visible also stops the rest of this
+                     * iteration running against a socket that has already died. */
+                    if (telnet_write_failed(telnet_client()))
+                    {
+                        tio_error_printf_silent("Could not answer the socket peer");
+                        goto error_read;
+                    }
                 }
 
                 /* Update receive statistics */

@@ -335,6 +335,16 @@ static ssize_t script_read_poll(void *data, size_t len, int timeout)
 
         ret = (ssize_t) telnet_filter_input(telnet_client(), device_fd, data,
                                             (size_t) ret);
+
+        /* A peer that cannot take its own answers is not one to keep waiting on. Reported
+         * as a read failure because that is what the caller already knows how to handle,
+         * and because continuing would spend the whole remaining timeout re-answering a
+         * socket that is gone. */
+        if (telnet_write_failed(telnet_client()))
+        {
+            return -1;
+        }
+
         if (ret > 0)
         {
             return ret;
