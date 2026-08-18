@@ -3068,7 +3068,24 @@ void device_wait(void)
              * process. Pacing every entry after the first would put a second on
              * the front of every reconnect, where a dropped session used to
              * retry at once - and for a socket target, a peer restarting is the
-             * ordinary case rather than an unusual one. */
+             * ordinary case rather than an unusual one.
+             *
+             * A consequence worth writing down, because a review found it by reading and
+             * it is not obvious: a peer that makes CONNECTING succeed and STAYING
+             * CONNECTED fail re-arms this on every pass, so for that peer the sleep below
+             * is never reached at all. Two other things bound the loop instead, and
+             * NEITHER is this pause:
+             *
+             *   interactive     the select() further down waits a second per pass. Measured
+             *                   at ~0.8 reconnects/second against a peer that accepts and
+             *                   drops immediately.
+             *   non-interactive the loop is not entered. A dropped peer fails the next
+             *                   write and the piped-input path reports it and exits.
+             *
+             * So removing the select() timeout, or making the piped path retry rather than
+             * exit, converts this exemption into an unpaced reconnect spin. Both are
+             * load-bearing for a reason that has nothing to do with why they were written.
+             * verify-kickolduser-flap.sh asserts the pacing still holds. */
             if (!probe_immediately)
             {
                 sleep(1);
