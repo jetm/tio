@@ -672,7 +672,7 @@ static void control_apply(unsigned char request)
     switch (request)
     {
         case CONTROL_BREAK_ON:
-            tty_apply_break();
+            tty_apply_break(true);
             break;
 
         case CONTROL_FLOW_NONE:

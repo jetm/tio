@@ -928,7 +928,18 @@ parity_t tty_apply_parity(parity_t parity)
  *
  * The floor still matters on a platform whose break is very short: without it, a
  * driver asserting for 5 ms would permit a 200-per-second stream that is bounded in
- * duty cycle and still floods the loop with syscalls. */
+ * duty cycle and still floods the loop with syscalls.
+ *
+ * Counting and refusing are separate, which is why enforce_gap exists. The limit is
+ * aimed at a remote client, so a break the operator asked for at the keyboard is
+ * never turned down - dropping a deliberate keystroke and saying so only in a debug
+ * line would be a worse outcome than the flood it averts. But it is still recorded,
+ * because the duty cycle it bounds belongs to the line rather than to whoever
+ * asserted it. While the keypress went straight to tcsendbreak and updated neither
+ * static, a client asking for a break during one had its gap measured from whenever
+ * the last REMOTE break ended - long ago or never - and was granted on the spot, so
+ * two full-length breaks landed back to back and the bound was defeated by anyone
+ * who could ask for one break at the moment an operator pressed the key. */
 #define BREAK_MIN_GAP_MS 250
 
 /* Deliberately takes no descriptor, and acts on device_fd.
@@ -943,7 +954,7 @@ parity_t tty_apply_parity(parity_t parity)
  * forward_to_device's parameter is the redundant one: both of its call sites pass device_fd.
  * Left alone rather than removed, because that is upstream's signature and this series has
  * no reason to touch it. */
-void tty_apply_break(void)
+void tty_apply_break(bool enforce_gap)
 {
     /* When the last break finished, and how long it held. Both are needed: the gap is
      * measured from completion, and its size is the previous break's own duration. */
@@ -963,7 +974,7 @@ void tty_apply_break(void)
      * and still used it afterwards to measure the break. */
     timed = (clock_gettime(CLOCK_MONOTONIC, &now) == 0);
 
-    if (timed && ((break_done.tv_sec != 0) || (break_done.tv_nsec != 0)))
+    if (enforce_gap && timed && ((break_done.tv_sec != 0) || (break_done.tv_nsec != 0)))
     {
         idle_ms = ((now.tv_sec - break_done.tv_sec) * 1000L)
                 + ((now.tv_nsec - break_done.tv_nsec) / 1000000L);
@@ -1615,7 +1626,11 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                     }
                     break;
                 }
-                tcsendbreak(device_fd, 0);
+                /* Not refused, but counted: the gap this break earns applies to the
+                 * next client that asks, not to the operator who just pressed the
+                 * key. Sending it here directly is what let a remote request slip in
+                 * during the hold. */
+                tty_apply_break(false);
                 break;
 
             case KEY_C:
@@ -3318,7 +3333,7 @@ void forward_to_device(int fd, char output_char)
                              * cheaper of the two paths open. A suppressed break
                              * is not an error, and a failed one is reported
                              * inside. */
-                            tty_apply_break();
+                            tty_apply_break(true);
                             status = 0;
                         }
                     }

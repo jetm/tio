@@ -120,8 +120,12 @@ int tty_apply_stopbits(int stopbits);
 parity_t tty_apply_parity(parity_t parity);
 flow_t tty_apply_flow(flow_t flow);
 
-// Send a break on the device being served, at a client's request
-void tty_apply_break(void);
+// Send a break on the device being served. Every break goes through here so that
+// each one is counted, including the ones this process is not willing to refuse:
+// enforce_gap says whether the caller's break may be turned down for arriving too
+// soon after the last, and a break sent with it false is still recorded against
+// the next caller that arrives with it true.
+void tty_apply_break(bool enforce_gap);
 
 // Drive a modem control line on the device being served to the state a client
 // asked for
