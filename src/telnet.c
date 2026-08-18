@@ -1146,17 +1146,21 @@ ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t c
     {
         ssize_t status = net_send_raw(fd, escaped + sent, produced - sent);
 
-        if (status < 0)
-        {
-            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
-            {
-                /* Nothing has gone wrong with the stream, so carry on from
-                 * where this stopped. Giving up here is what left a doubled
-                 * marker split down the middle. */
-                continue;
-            }
-        }
-
+        /* Deliberately no retry on EINTR or EAGAIN here, which is worth saying because
+         * this loop used to have one and it looked obviously right.
+         *
+         * EINTR cannot arrive: net_send_raw absorbs it itself, so it never returns -1
+         * with that errno. EAGAIN can, and it does not mean "try again" - net_send_raw
+         * returns it only after the send timeout has expired SEND_MAX_STALLED times
+         * with no progress at all, which is its verdict that the peer has stopped
+         * reading and should be shed. Retrying that restarted the budget from the top,
+         * so the bound became unbounded: exactly the failure net_send_raw's own comment
+         * describes one level further down, reintroduced above it.
+         *
+         * The split-marker case the retry was added for is handled by the whole-byte
+         * accounting below, which reports only caller-bytes whose escaped form went out
+         * complete. That is what keeps a doubled marker from being cut in half - not
+         * the retry. */
         if (status <= 0)
         {
             /* Report the caller's bytes whose escaped form went out in full,
