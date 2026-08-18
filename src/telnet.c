@@ -182,10 +182,17 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_do_sent))
+    if (!((opt == OPT_COM_PORT) && telnet->com_port_do_sent && !telnet->remote_answered[opt]))
     {
-        /* Skipped only when this is the peer agreeing to a DO already sent from
-         * here: repeating it would be a second request for the same option.
+        /* Skipped only when this is the peer's first word on a DO already sent from
+         * here - agreeing or refusing. Either way it answers that request, and a
+         * request has nothing owed to its own answer. Testing the answer rather than
+         * the outcome is what makes a refusal count: a peer with no serial-port
+         * support says WONT, and a DONT back at it announces a disabled state both
+         * ends already agree on, which is the one thing RFC 854 forbids outright.
+         *
+         * Bounded by remote_answered rather than open-ended, so a peer that declines
+         * now and offers later still gets the DO that acknowledges the change.
          * Mirrors the same test on the WILL side. */
         send_command(telnet, fd, wanted ? DO : DONT, opt);
     }
@@ -202,10 +209,12 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_will_sent))
+    if (!((opt == OPT_COM_PORT) && telnet->com_port_will_sent && !telnet->local_answered[opt]))
     {
-        /* Skipped only when this is the peer agreeing to a WILL already sent from
-         * here: repeating it would be a second offer of the same option */
+        /* Skipped only when this is the peer's first word on a WILL already sent from
+         * here - agreeing or refusing. A plain Telnet accepter with no RFC 2217
+         * support answers DONT, and a WONT back at it is the same forbidden
+         * announcement described on the DO side. */
         send_command(telnet, fd, wanted ? WILL : WONT, opt);
     }
     telnet->local_enabled[opt] = wanted;
