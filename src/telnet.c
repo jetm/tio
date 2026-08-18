@@ -241,10 +241,16 @@ static size_t append_value(unsigned char *out, size_t at, unsigned char value)
 }
 
 /* Abandon a subnegotiation whose payload has overrun the buffer, and go back to reading
- * data. Both ways into the overrun end here so that the recovery is expressed once. */
+ * data. Both ways into the overrun end here so that the recovery is expressed once.
+ *
+ * Returning to DATA is what enforces "never act on a truncated payload" - handle_subneg is
+ * only reached from the subnegotiation states, and this leaves them. A flag saying the same
+ * thing was kept here as well, and it could not be read: it was cleared at the next IAC SB
+ * and handle_subneg could not be entered in between. Two mechanisms for one rule, one of
+ * them dead, is worse than one - a reader trusts the guard and may then weaken the thing
+ * that actually does the work. */
 static void subneg_abandon(telnet_t *telnet)
 {
-    telnet->subneg_overflow = true;
     telnet->subneg_length = 0;
     telnet->state = TELNET_STATE_DATA;
 
@@ -692,8 +698,14 @@ static unsigned char control_state(unsigned char request)
         case CONTROL_GROUP_FLOW_OUT:
             /* What the port is at now, which after an apply is what it took and
              * not necessarily what was asked for - the same rule as every other
-             * setting. Read back rather than remembered, so a mode the device
-             * refused is reported as refused. */
+             * setting.
+             *
+             * Remembered, not read back: tty_flow_control_value() maps option.flow. The
+             * answer is still honest because tty_apply_flow() rolls option.flow back when
+             * verification fails, so a mode the device refused is never recorded as
+             * adopted - but the honesty lives there and not here. This comment used to
+             * claim a read-back, which is what tty_line_asserted() does with TIOCMGET two
+             * functions further down; it was describing the wrong function. */
             return (unsigned char) tty_flow_control_value();
 
         case CONTROL_GROUP_FLOW_IN:
@@ -858,13 +870,6 @@ static void handle_com_port_request(telnet_t *telnet, int fd)
  * dispatches can fail to reach the peer, and that is recorded on the session. */
 static void handle_subneg(telnet_t *telnet, int fd)
 {
-    if (telnet->subneg_overflow)
-    {
-        /* A payload longer than anything this speaks; acting on a truncated
-         * one would be worse than ignoring it */
-        return;
-    }
-
     if ((telnet->subneg_length < 1) || (telnet->subneg[0] != OPT_COM_PORT))
     {
         return;
@@ -1019,7 +1024,6 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                      * by accident, so this settles that the peer speaks Telnet */
                     telnet->engaged = true;
                     telnet->subneg_length = 0;
-                    telnet->subneg_overflow = false;
                     telnet->state = TELNET_STATE_SUBNEG;
                 }
                 else

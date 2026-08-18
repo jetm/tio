@@ -911,6 +911,18 @@ parity_t tty_apply_parity(parity_t parity)
  * or a report of a line held in break by a paced client. */
 #define BREAK_MIN_INTERVAL_MS 250
 
+/* Deliberately takes no descriptor, and acts on device_fd.
+ *
+ * A review suggested giving it one so that forward_to_device's own `fd` parameter would be
+ * honoured all the way down. That is wrong, and the compiler says so: control_apply() also
+ * calls this, and ITS fd is the client socket the request arrived on, not the served device.
+ * A break always belongs to the device, so a parameter here would be a descriptor two
+ * callers would have to remember to disagree about - exactly the mistake this series already
+ * made once, when the stale-socket probe connected on one descriptor and closed another.
+ *
+ * forward_to_device's parameter is the redundant one: both of its call sites pass device_fd.
+ * Left alone rather than removed, because that is upstream's signature and this series has
+ * no reason to touch it. */
 void tty_apply_break(void)
 {
     static struct timespec last_break = { 0, 0 };

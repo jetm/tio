@@ -180,30 +180,21 @@ void socket_configure(void)
         }
     }
 
+    /* No range test on what these return. Both go through net_parse_port, which reports and
+     * exits on anything outside 0-65535, so a negative can no longer arrive here - the two
+     * checks that used to sit below these calls were left over from atoi() and were
+     * unreachable. Ten lines of validation that cannot fire is worse than none: it reads as
+     * the place where the range is enforced, so a later change to the parser looks safe. */
     if (strncmp(option.socket, "inet:", 5) == 0)
     {
         socket_family = AF_INET;
-
         port_number = socket_inet_port();
-
-        if (port_number < 0)
-        {
-            tio_error_printf("Invalid port number: %d", port_number);
-            exit(EXIT_FAILURE);
-        }
     }
 
     if (strncmp(option.socket, "inet6:", 6) == 0)
     {
         socket_family = AF_INET6;
-
         port_number = socket_inet6_port();
-
-        if (port_number < 0)
-        {
-            tio_error_printf("Invalid port number: %d", port_number);
-            exit(EXIT_FAILURE);
-        }
     }
 
     if (socket_family == AF_UNSPEC)

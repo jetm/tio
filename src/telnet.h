@@ -99,7 +99,6 @@ typedef struct
 
     unsigned char subneg[TELNET_SUBNEG_MAX];
     size_t subneg_length;
-    bool subneg_overflow;
 
     // What was last asked of the remote port, kept so that the server's answer
     // can be compared against it. A server is entitled to answer with a
