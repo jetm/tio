@@ -75,17 +75,24 @@ typedef struct
     // telnet_filter_input returns; see telnet_write_failed().
     bool write_failed;
 
-    // Whether this side has already sent WILL for the serial-port option, and
-    // whether it has already sent DO. Two flags rather than one, because they are
-    // opposite commitments: WILL offers to provide the option, DO asks the peer to.
-    // Sharing a flag made a server that had sent DO suppress the WILL it owed a
-    // client that asked - the answer that says the option is available at all.
+    // Whether this side has spoken first about an option, per option and per
+    // direction: local_sent for a WILL we offered, remote_sent for a DO we asked.
+    // Two arrays rather than one, because they are opposite commitments - WILL
+    // offers to provide the option, DO asks the peer to - and sharing a flag made a
+    // server that had sent DO suppress the WILL it owed a client that asked.
+    //
+    // Per option rather than per named option. These were two bools for the
+    // serial-port option alone, which meant every other option's first word had no
+    // record and the guards that use these carried an `opt == OPT_COM_PORT` test to
+    // say so. That left binary asserting agreement it had not received, because the
+    // only way to avoid re-answering a peer was to claim the option was already
+    // live. One array removes both the special case and the claim.
     //
     // A client is otherwise purely reactive, which leaves it silent against a
     // server that waits to be asked; its WILL is only sent once the peer has shown
     // it speaks Telnet, so a raw peer is still never written to unasked.
-    bool com_port_will_sent;
-    bool com_port_do_sent;
+    bool local_sent[TELNET_OPTION_COUNT];
+    bool remote_sent[TELNET_OPTION_COUNT];
 
     // What has been settled for each option, and whether it has been answered
     // at all. Both are needed: an unanswered request must be answered even when

@@ -182,7 +182,7 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    if (!((opt == OPT_COM_PORT) && telnet->com_port_do_sent && !telnet->remote_answered[opt]))
+    if (!(telnet->remote_sent[opt] && !telnet->remote_answered[opt]))
     {
         /* Skipped only when this is the peer's first word on a DO already sent from
          * here - agreeing or refusing. Either way it answers that request, and a
@@ -204,12 +204,30 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
 {
     bool wanted = requested && option_wanted(opt);
 
+    /* RFC 2217 runs the serial-port option in one direction: the client sends WILL and
+     * the server answers DO. So a DO arriving AT the server is asking it to be the WILL
+     * side, which it has no way to be - this server answers com-port commands and never
+     * originates them.
+     *
+     * Answering WILL to that was affirmative and unkeepable. handle_subneg gates requests
+     * on the client's own WILL, correctly, so a client that sent only DO saw its
+     * negotiation succeed and then watched every request it made disappear into a debug
+     * line. WONT is the answer that agrees with what happens next.
+     *
+     * Only on the server. On the client a DO for this option is the expected agreement to
+     * the WILL it already sent, and refusing it there would decline the whole point of
+     * asking. */
+    if ((opt == OPT_COM_PORT) && (telnet->role == TELNET_ROLE_SERVER))
+    {
+        wanted = false;
+    }
+
     if (telnet->local_answered[opt] && (telnet->local_enabled[opt] == wanted))
     {
         return;
     }
 
-    if (!((opt == OPT_COM_PORT) && telnet->com_port_will_sent && !telnet->local_answered[opt]))
+    if (!(telnet->local_sent[opt] && !telnet->local_answered[opt]))
     {
         /* Skipped only when this is the peer's first word on a WILL already sent from
          * here - agreeing or refusing. A plain Telnet accepter with no RFC 2217
@@ -923,25 +941,25 @@ void telnet_server_offer(telnet_t *telnet, int fd)
     /* Binary in both directions so the high bit of a serial byte survives,
      * and the serial-port option so a client can configure the device */
     send_command(telnet, fd, WILL, OPT_BINARY);
-    telnet->local_enabled[OPT_BINARY] = true;
-    telnet->local_answered[OPT_BINARY] = true;
+    telnet->local_sent[OPT_BINARY] = true;
 
     send_command(telnet, fd, DO, OPT_BINARY);
-    telnet->remote_enabled[OPT_BINARY] = true;
-    telnet->remote_answered[OPT_BINARY] = true;
+    telnet->remote_sent[OPT_BINARY] = true;
 
     send_command(telnet, fd, DO, OPT_COM_PORT);
 
-    /* Record that the offer was made, so the client's answer is read as an answer
-     * rather than as an unsolicited offer needing one - which is what drew a
-     * second DO for the same option on every negotiated session.
+    /* Record that each offer was made, so the client's answer is read as an answer
+     * rather than as an unsolicited offer needing one - which is what drew a second DO
+     * for the same option on every negotiated session.
      *
-     * Deliberately NOT remote_enabled/remote_answered, which the two lines above
-     * do set for binary. remote_enabled[OPT_COM_PORT] is the test that refuses
-     * serial requests from a client that never took the option; asserting it here
-     * would mean a client that ignores the offer and sends requests anyway gets
-     * them honoured. Asking is not being answered. */
-    telnet->com_port_do_sent = true;
+     * Recording the offer and NOT the agreement, for all three. remote_enabled and
+     * local_enabled stay false until the peer says so: remote_enabled[OPT_COM_PORT] is
+     * the test that refuses serial requests from a client that never took the option, and
+     * asserting it here would honour requests from a client that ignored the offer
+     * entirely. Asking is not being answered. Binary used to be the exception - it
+     * claimed both directions were live the moment its commands went out - and it was the
+     * only reason those two slots ever disagreed with the wire. */
+    telnet->remote_sent[OPT_COM_PORT] = true;
 }
 
 static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
@@ -978,10 +996,10 @@ static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsig
      * put three protocol bytes in front of a peer that speaks no protocol, and
      * tio's own socket server forwards whatever it is sent straight to the
      * serial device, so those bytes would land on somebody's console. */
-    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_will_sent
+    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->local_sent[OPT_COM_PORT]
             && !telnet->local_answered[OPT_COM_PORT])
     {
-        telnet->com_port_will_sent = true;
+        telnet->local_sent[OPT_COM_PORT] = true;
         send_command(telnet, fd, WILL, OPT_COM_PORT);
     }
 }
