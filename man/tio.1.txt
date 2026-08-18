@@ -269,8 +269,9 @@ OPTIONS
               command marker reaches it doubled. That is the cost of the option and the reason it is not the default.
 
               A socket set by --socket inet: or --socket inet6: is bound on every interface and asks nobody for a password. That is defensible while the socket carries bytes, because bytes are all a client can put on the line.   Offering
-              RFC 2217 over it is a different matter: any client that can reach the port can then set the baud rate, drop DTR and assert a break on the attached board, and a break on a Linux console is a SysRq key. Prefer --socket unix:,
-              which is protected by file permissions, or keep the port off any network the machine does not own.
+              RFC 2217 over it is a different matter: any client that can reach the port can then set the baud rate, switch the flow control, drop DTR and assert a break on the attached board. A break on a Linux console is a SysRq key, and
+              hardware flow control asked for on a board that does not drive CTS stops the console being written to at all - so the option is enough to wedge a line as well as to type on it. Prefer --socket unix:, which is protected by file
+              permissions, or keep the port off any network the machine does not own.
 
            --rfc2217
 
@@ -560,6 +561,10 @@ CONFIGURATION FILE
        output-mode              Set output mode
 
        socket                   Set socket to redirect I/O to
+
+       rfc2217                  Speak RFC 2217 to a socket target
+
+       socket-rfc2217           Offer RFC 2217 to clients of the socket
 
        prefix-ctrl-key          Set prefix ctrl key (a..z or 'none', default: t)
 
