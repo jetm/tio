@@ -3068,7 +3068,11 @@ void device_wait(void)
                     /* Handle commands */
                     handle_command_sequence(input_char, NULL, NULL);
                 }
-                socket_handle_input(&rdfs, NULL);
+                /* Accepting only. There is no device to forward a client's bytes to yet,
+                 * and passing NULL to the full handler put a null pointer into its
+                 * client-read path - unreachable, but only because socket_add_fds leaves
+                 * client descriptors out of the set while disconnected. */
+                socket_accept_pending(&rdfs);
             }
             else if (status == -1)
             {

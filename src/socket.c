@@ -391,16 +391,35 @@ bool socket_map_input_char(char *character)
     return true;
 }
 
-bool socket_handle_input(fd_set *rdfs, char *output_char)
+/* Accept whatever is waiting, and nothing else.
+ *
+ * Split out of socket_handle_input because the two callers want different halves of it.
+ * device_wait() runs while there is no device and wants only this: it used to call
+ * socket_handle_input(&rdfs, NULL), and the client-read loop below dereferences that pointer
+ * with no check. It never crashed, but only because socket_add_fds(&rdfs, false) leaves client
+ * descriptors out of the set while disconnected - so the safety of a null dereference here
+ * rested on a decision in another file, and the day that decision changes there is nothing at
+ * this end to catch it. With the halves separate there is no pointer to pass. */
+void socket_accept_pending(fd_set *rdfs)
 {
     if (!option.socket)
     {
-        return false;
+        return;
     }
 
     if (FD_ISSET(sockfd, rdfs))
     {
         int clientfd = accept(sockfd, NULL, NULL);
+
+        /* Once, at the top, rather than at each step that touches the descriptor. Two of
+         * the steps below tested it and the refusal further down did not, so a failed
+         * accept() reached net_send_raw(-1, ...) and close(-1) - harmless, and the kind of
+         * inconsistency that stops being harmless when a fourth step is added and nobody
+         * notices which of its neighbours check. */
+        if (clientfd < 0)
+        {
+            return;
+        }
 
         /* Suppress SIGPIPE on this connection the way the client and the
          * listening socket already do. Every write to a client goes to a
@@ -408,7 +427,6 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
          * from the listener would make the whole server path depend on a
          * platform detail rather than on a call. */
 #if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-        if (clientfd >= 0)
         {
             int optval = 1;
             if (setsockopt(clientfd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval)))
@@ -422,7 +440,6 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
          * applies everywhere. Nesting it inside was worth catching - it would have left
          * the stall unbounded on exactly the platforms that define MSG_NOSIGNAL, which is
          * every Linux target. */
-        if (clientfd >= 0)
         {
             /* Bound how long this client can hold the device read path.
              *
@@ -495,6 +512,17 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
             }
         }
     }
+}
+
+bool socket_handle_input(fd_set *rdfs, char *output_char)
+{
+    if (!option.socket)
+    {
+        return false;
+    }
+
+    socket_accept_pending(rdfs);
+
     for (int i = 0; i != MAX_SOCKET_CLIENTS; ++i)
     {
         if (clientfds[i] != -1 && FD_ISSET(clientfds[i], rdfs))
