@@ -182,18 +182,35 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    if (!(telnet->remote_sent[opt] && !telnet->remote_answered[opt]))
+    if (!(telnet->remote_sent[opt] && !telnet->remote_answered[opt])
+            && (offered || telnet->remote_enabled[opt]))
     {
-        /* Skipped only when this is the peer's first word on a DO already sent from
-         * here - agreeing or refusing. Either way it answers that request, and a
-         * request has nothing owed to its own answer. Testing the answer rather than
-         * the outcome is what makes a refusal count: a peer with no serial-port
-         * support says WONT, and a DONT back at it announces a disabled state both
-         * ends already agree on, which is the one thing RFC 854 forbids outright.
+        /* Skipped in two cases, and the second was missing.
          *
-         * Bounded by remote_answered rather than open-ended, so a peer that declines
-         * now and offers later still gets the DO that acknowledges the change.
-         * Mirrors the same test on the WILL side. */
+         * The first: this is the peer's first word on a DO already sent from here -
+         * agreeing or refusing. Either way it answers that request, and a request has
+         * nothing owed to its own answer. Testing the answer rather than the outcome is
+         * what makes a refusal count: a peer with no serial-port support says WONT, and a
+         * DONT back at it announces a disabled state both ends already agree on, which is
+         * the one thing RFC 854 forbids outright. Bounded by remote_answered rather than
+         * open-ended, so a peer that declines now and offers later still gets the DO that
+         * acknowledges the change.
+         *
+         * The second: an unsolicited WONT, for an option this side never raised and that
+         * was therefore never on. That changes nothing either, so answering it makes the
+         * same forbidden announcement the paragraph above describes - and the guard above
+         * cannot catch it, because it asks whether a request is outstanding and an
+         * unsolicited refusal has none. RFC 1143's Q Method states the rule directly: on
+         * WONT, if the option is already off, ignore it. It self-limited rather than
+         * looping, since the answer sets remote_answered and the peer's answer to the
+         * answer meets the settled-state test above, so the cost was a spurious exchange
+         * rather than a hang.
+         *
+         * Keyed on `offered` rather than on `wanted`, because a refusal and a declined
+         * offer are different things that both arrive with wanted false. A peer OFFERING
+         * an option this side does not want is requesting a change and must be answered;
+         * only a peer refusing one that was already off is announcing what is already
+         * true. Testing wanted here would have silenced both. */
         send_command(telnet, fd, wanted ? DO : DONT, opt);
     }
     telnet->remote_enabled[opt] = wanted;
@@ -227,12 +244,19 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
         return;
     }
 
-    if (!(telnet->local_sent[opt] && !telnet->local_answered[opt]))
+    if (!(telnet->local_sent[opt] && !telnet->local_answered[opt])
+            && (requested || telnet->local_enabled[opt]))
     {
-        /* Skipped only when this is the peer's first word on a WILL already sent from
-         * here - agreeing or refusing. A plain Telnet accepter with no RFC 2217
-         * support answers DONT, and a WONT back at it is the same forbidden
-         * announcement described on the DO side. */
+        /* Skipped when this is the peer's first word on a WILL already sent from here -
+         * agreeing or refusing. A plain Telnet accepter with no RFC 2217 support answers
+         * DONT, and a WONT back at it is the same forbidden announcement described on the
+         * DO side.
+         *
+         * And skipped for an unsolicited DONT, on the same reasoning as the mirror: a
+         * refusal of an option that was never on announces what both ends already agree
+         * on. `requested` rather than `wanted` for the same reason too - a DO this side
+         * will not honour still has to be answered, which is what tells a client its
+         * requests are going nowhere before it makes them. */
         send_command(telnet, fd, wanted ? WILL : WONT, opt);
     }
     telnet->local_enabled[opt] = wanted;
