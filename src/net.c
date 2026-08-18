@@ -313,6 +313,38 @@ int net_connect(void)
         return -1;
     }
 
+    /* Bound what a peer that stops reading can cost this side, the same way the socket
+     * server already bounds what one client can cost the others.
+     *
+     * A client writes little - answers to negotiation, a lazy WILL, the settings that were
+     * named - which is why this looked unnecessary, and net_send_raw's own comment recorded
+     * the client as exempt because it "sends on a plainly blocking socket". That exemption
+     * was the hazard. The peer chooses when to stop calling recv, and once its window fills
+     * a blocking send has nothing to end it: measured against a peer that flooded
+     * negotiation and never read, tio.read(8, 4000) returned after 40 SECONDS, and only
+     * because the peer eventually closed. One that stays connected and silent holds the
+     * read for as long as it likes.
+     *
+     * The overshoot happens inside a single round, so no amount of care in
+     * script_read_poll's timeout accounting can catch it - the blocking send is under
+     * telnet_filter_input, which that loop calls between its own checks. The bound has to
+     * be on the socket. With it, net_send_raw's existing retry budget converts a peer that
+     * has stopped reading into the delivery failure every caller already handles, and the
+     * worst case becomes SEND_TIMEOUT_MS times SEND_MAX_STALLED.
+     *
+     * Not fatal if it cannot be set: that is the behaviour that shipped before, and saying
+     * so beats leaving an operator to infer it from a read that never returns. */
+    struct timeval sndtimeo = {
+        .tv_sec = SEND_TIMEOUT_MS / 1000,
+        .tv_usec = (SEND_TIMEOUT_MS % 1000) * 1000,
+    };
+
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndtimeo, sizeof(sndtimeo)))
+    {
+        tio_warning_printf("Could not bound this connection's send timeout (%s); a peer that stops reading can hold a read open indefinitely",
+                strerror(errno));
+    }
+
     return fd;
 }
 

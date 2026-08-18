@@ -324,6 +324,18 @@ static ssize_t script_read_poll(void *data, size_t len, int timeout)
 
     clock_gettime(CLOCK_MONOTONIC, &start);
 
+    /* Already known undeliverable, from a previous call. The check below catches a failure
+     * as it happens, and cannot catch one that happened earlier: a script that wraps its
+     * read in pcall and asks again would spend a fresh timeout per attempt reading protocol
+     * it has no way to answer, which is the cost the branch below exists to avoid. The flag
+     * is a latch and the session does not recover, so the honest answer is the same one and
+     * it can be given now. */
+    if ((device_mode == DEVICE_MODE_SOCKET) && telnet_write_failed(telnet_client()))
+    {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+
     while (true)
     {
         ssize_t ret = read_poll(device_fd, data, len, remaining);
@@ -342,6 +354,16 @@ static ssize_t script_read_poll(void *data, size_t len, int timeout)
          * socket that is gone. */
         if (telnet_write_failed(telnet_client()))
         {
+            /* Both callers report strerror(errno), and what errno holds here is whatever
+             * the failing send left - now usually EAGAIN, since bounding the client's send
+             * timeout made the retry budget the ordinary way this is reached. "Resource
+             * temporarily unavailable" is the wrong thing to tell a script: it reads as
+             * transient and worth retrying, when net_send_raw returns it only after the
+             * timeout expired SEND_MAX_STALLED times and the verdict is that the peer has
+             * stopped taking bytes. ETIMEDOUT says that, and says it whatever the last
+             * syscall happened to set - which matters on a retry after the latch, where no
+             * send is attempted at all and errno could describe something unrelated. */
+            errno = ETIMEDOUT;
             return -1;
         }
 
