@@ -81,6 +81,20 @@ typedef struct
     // offers to provide the option, DO asks the peer to - and sharing a flag made a
     // server that had sent DO suppress the WILL it owed a client that asked.
     //
+    // FIRST is the whole of it: answering a peer does not set these. A DO sent to
+    // agree with a peer's WILL leaves remote_sent false, because the guards that
+    // read these ask "is an unanswered request of ours outstanding" and an answer is
+    // not a request. Naming them for the command they hold rather than for any
+    // message sent would read better in isolation and worse where it matters - the
+    // local_/remote_ prefix already means "about our side" and "about the peer's",
+    // as it does on enabled and answered, and these follow it.
+    //
+    // They are also live state and not a property of the role, which is why there is
+    // no predicate over (role, option) here instead. A client's WILL for the
+    // serial-port option is sent lazily, once, only after the peer has shown it
+    // speaks Telnet; "may this role offer this option" cannot express "and has it
+    // yet", so the record has to exist either way.
+    //
     // Per option rather than per named option. These were two bools for the
     // serial-port option alone, which meant every other option's first word had no
     // record and the guards that use these carried an `opt == OPT_COM_PORT` test to
