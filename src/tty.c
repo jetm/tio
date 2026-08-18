@@ -3333,6 +3333,32 @@ int device_connect(void)
     char*  now = NULL;
     struct timeval tval_before = {}, tval_now, tval_result;
 
+    /* Refuse before connecting rather than after. A client engages the protocol the
+     * moment it resets, and telnet_filter_input() ignores a context that is not
+     * enabled, so on the client side engaged is exactly option.rfc2217: the answer is
+     * settled before the socket exists, and nothing the peer does can change it.
+     *
+     * Refusing after net_connect() meant opening the port only to say no, and a
+     * ser2net accepter that serves one session at a time hands the line over on
+     * connect - so the refusal took the device from whoever was already using it.
+     *
+     * The other two conjuncts are load-bearing, not defensive. device_mode is
+     * resolved by tty_search() and only under --auto-connect direct, so it cannot be
+     * read off option.target here. interactive_mode is tested because --exec is
+     * already ignored in non-interactive mode further down, for every target; leaving
+     * it out would turn that silent success into a failure, which is a different
+     * change from this one and not one a review asked for.
+     *
+     * The interactive escape key keeps device_escaping(). It asks the same question of
+     * a running session, where engagement really can change underneath it, so the two
+     * are not one test written twice. */
+    if ((option.exec != NULL) && interactive_mode && option.rfc2217
+            && (device_mode == DEVICE_MODE_SOCKET))
+    {
+        tio_error_printf("--exec writes straight to the connection, which would put unescaped bytes on an RFC 2217 session");
+        exit(EXIT_FAILURE);
+    }
+
     if (device_mode == DEVICE_MODE_SOCKET)
     {
         /* Connect to socket endpoint */
@@ -3552,10 +3578,8 @@ int device_connect(void)
 
     if (option.exec != NULL)
     {
-        if (device_escaping("--exec"))
-        {
-            exit(EXIT_FAILURE);
-        }
+        /* Already refused at the top of this function where it applies, before any
+         * connection was made */
         status = execute_shell_command(device_fd, option.exec);
         exit(status);
     }
