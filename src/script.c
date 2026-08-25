@@ -77,6 +77,11 @@ static char script_init[] =
 "tio.alwaysecho = true\n"
 "setmetatable(tio, tio)\n";
 
+/* Mirrors tty.c's own do_timestamp flag for the separate script-echo path:
+   armed on start and after every '\n', consumed by the next byte that is
+   neither '\n' nor '\r'. */
+static bool script_echo_do_timestamp = true;
+
 static bool alwaysecho(lua_State *L)
 {
     bool b;
@@ -94,24 +99,36 @@ static int api_echo(lua_State *L)
     size_t len = 0;
     const char *str = luaL_checklstring(L, 1, &len);
 
-    if (option.timestamp)
+    for (size_t i=0; i<len; i++)
     {
-        char *pTimeStampNow = timestamp_current_time();
-        if (pTimeStampNow)
+        if (option.timestamp && script_echo_do_timestamp && str[i] != '\n' && str[i] != '\r')
         {
-            tio_printf("%s", str);
-            if (option.log)
+            char *pTimeStampNow = timestamp_current_time();
+            if (pTimeStampNow)
             {
-                log_printf("\n[%s] %s", pTimeStampNow, str);
+                ansi_printf_raw("[%s] ", pTimeStampNow);
+                if (option.log)
+                {
+                    log_printf("[%s] ", pTimeStampNow);
+                }
+                script_echo_do_timestamp = false;
             }
         }
-    } else {
-        for (size_t i=0; i<len; i++)
-        {
-            putchar(str[i]);
 
-            if (option.log)
-                log_putc(str[i]);
+        /* print_normal, not putchar: it sets print_tainted, which is what tells the
+           next tio_printf to break the line before writing. tty.c does the same after
+           every device byte (its printchar is bound to print_normal). Writing the byte
+           raw left the flag clear, so a status message arriving after an echo was
+           emitted with ansi_printf's leading \r and overwrote the echoed text at column
+           zero - observed as "banner-line login:" being replaced by "Disconnected". */
+        print_normal(str[i]);
+
+        if (option.log)
+            log_putc(str[i]);
+
+        if (option.timestamp && str[i] == '\n')
+        {
+            script_echo_do_timestamp = true;
         }
     }
 
@@ -500,6 +517,13 @@ void script_run(int fd, const char *script_filename)
     lua_State *L;
 
     device_fd = fd;
+
+    /* Arm per run, the way tty.c arms its own flag per connection. Without this a
+       run whose last echoed byte was not a newline leaves the flag clear for the
+       next run, and that run's first line of device output goes out unstamped -
+       and stays unstamped until some output happens to carry a '\n'. The flag is
+       file-scope rather than per-call because api_echo is entered once per byte. */
+    script_echo_do_timestamp = true;
 
     L = luaL_newstate();
     luaL_openlibs(L);
