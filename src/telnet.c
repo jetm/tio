@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -115,11 +116,36 @@ void telnet_reset(telnet_t *telnet, telnet_role_t role, bool enabled)
     telnet->state = TELNET_STATE_DATA;
     telnet->role = role;
     telnet->enabled = enabled;
+
+    /* Asking for the option is the commitment, so a client escapes from its first
+     * byte rather than from the peer's first command.
+     *
+     * This is the same decision telnet_server_offer() already makes for the server,
+     * and for the same reason: waiting for the peer to prove it speaks Telnet leaves
+     * every byte equal to the marker going out bare until it does. On the client that
+     * window is not a corner case but the common one - a peer's offer costs a round
+     * trip while piped input is ready immediately, so a short piped payload always
+     * won the race and went out unescaped. A lone 0xFF then took the byte behind it
+     * with it, and the marker-doubling rule differed by role for no reason anyone
+     * had argued for.
+     *
+     * Engaging does not send anything, so the rule that a client never writes to a
+     * raw peer unasked still holds - what changes is how its own data bytes are
+     * encoded, and only when the user asked for the protocol. */
+    if (enabled && (role == TELNET_ROLE_CLIENT))
+    {
+        telnet->engaged = true;
+    }
 }
 
 bool telnet_engaged(const telnet_t *telnet)
 {
     return telnet->engaged;
+}
+
+bool telnet_write_failed(const telnet_t *telnet)
+{
+    return telnet->write_failed;
 }
 
 /* Binary keeps the high bit of a serial byte intact and suppress-go-ahead puts
@@ -131,11 +157,18 @@ static bool option_wanted(unsigned char opt)
            (opt == OPT_COM_PORT);
 }
 
-static void send_command(int fd, unsigned char command, unsigned char opt)
+/* Records a delivery failure on the session rather than returning it, because none of the
+ * negotiation call sites can do anything locally about a peer that will not take three
+ * bytes - the useful response is to stop having that peer, which is the caller of
+ * telnet_filter_input's decision to make. See telnet_write_failed(). */
+static void send_command(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
 {
     unsigned char message[3] = { IAC, command, opt };
 
-    net_send_raw(fd, message, sizeof(message));
+    if (net_send_raw(fd, message, sizeof(message)) != (ssize_t) sizeof(message))
+    {
+        telnet->write_failed = true;
+    }
 }
 
 static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, bool offered)
@@ -149,12 +182,36 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_do_sent))
+    if (!(telnet->remote_sent[opt] && !telnet->remote_answered[opt])
+            && (offered || telnet->remote_enabled[opt]))
     {
-        /* Skipped only when this is the peer agreeing to a DO already sent from
-         * here: repeating it would be a second request for the same option.
-         * Mirrors the same test on the WILL side. */
-        send_command(fd, wanted ? DO : DONT, opt);
+        /* Skipped in two cases, and the second was missing.
+         *
+         * The first: this is the peer's first word on a DO already sent from here -
+         * agreeing or refusing. Either way it answers that request, and a request has
+         * nothing owed to its own answer. Testing the answer rather than the outcome is
+         * what makes a refusal count: a peer with no serial-port support says WONT, and a
+         * DONT back at it announces a disabled state both ends already agree on, which is
+         * the one thing RFC 854 forbids outright. Bounded by remote_answered rather than
+         * open-ended, so a peer that declines now and offers later still gets the DO that
+         * acknowledges the change.
+         *
+         * The second: an unsolicited WONT, for an option this side never raised and that
+         * was therefore never on. That changes nothing either, so answering it makes the
+         * same forbidden announcement the paragraph above describes - and the guard above
+         * cannot catch it, because it asks whether a request is outstanding and an
+         * unsolicited refusal has none. RFC 1143's Q Method states the rule directly: on
+         * WONT, if the option is already off, ignore it. It self-limited rather than
+         * looping, since the answer sets remote_answered and the peer's answer to the
+         * answer meets the settled-state test above, so the cost was a spurious exchange
+         * rather than a hang.
+         *
+         * Keyed on `offered` rather than on `wanted`, because a refusal and a declined
+         * offer are different things that both arrive with wanted false. A peer OFFERING
+         * an option this side does not want is requesting a change and must be answered;
+         * only a peer refusing one that was already off is announcing what is already
+         * true. Testing wanted here would have silenced both. */
+        send_command(telnet, fd, wanted ? DO : DONT, opt);
     }
     telnet->remote_enabled[opt] = wanted;
     telnet->remote_answered[opt] = true;
@@ -164,16 +221,43 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
 {
     bool wanted = requested && option_wanted(opt);
 
+    /* RFC 2217 runs the serial-port option in one direction: the client sends WILL and
+     * the server answers DO. So a DO arriving AT the server is asking it to be the WILL
+     * side, which it has no way to be - this server answers com-port commands and never
+     * originates them.
+     *
+     * Answering WILL to that was affirmative and unkeepable. handle_subneg gates requests
+     * on the client's own WILL, correctly, so a client that sent only DO saw its
+     * negotiation succeed and then watched every request it made disappear into a debug
+     * line. WONT is the answer that agrees with what happens next.
+     *
+     * Only on the server. On the client a DO for this option is the expected agreement to
+     * the WILL it already sent, and refusing it there would decline the whole point of
+     * asking. */
+    if ((opt == OPT_COM_PORT) && (telnet->role == TELNET_ROLE_SERVER))
+    {
+        wanted = false;
+    }
+
     if (telnet->local_answered[opt] && (telnet->local_enabled[opt] == wanted))
     {
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_will_sent))
+    if (!(telnet->local_sent[opt] && !telnet->local_answered[opt])
+            && (requested || telnet->local_enabled[opt]))
     {
-        /* Skipped only when this is the peer agreeing to a WILL already sent from
-         * here: repeating it would be a second offer of the same option */
-        send_command(fd, wanted ? WILL : WONT, opt);
+        /* Skipped when this is the peer's first word on a WILL already sent from here -
+         * agreeing or refusing. A plain Telnet accepter with no RFC 2217 support answers
+         * DONT, and a WONT back at it is the same forbidden announcement described on the
+         * DO side.
+         *
+         * And skipped for an unsolicited DONT, on the same reasoning as the mirror: a
+         * refusal of an option that was never on announces what both ends already agree
+         * on. `requested` rather than `wanted` for the same reason too - a DO this side
+         * will not honour still has to be answered, which is what tells a client its
+         * requests are going nowhere before it makes them. */
+        send_command(telnet, fd, wanted ? WILL : WONT, opt);
     }
     telnet->local_enabled[opt] = wanted;
     telnet->local_answered[opt] = true;
@@ -207,7 +291,34 @@ static size_t append_value(unsigned char *out, size_t at, unsigned char value)
     return at;
 }
 
-static void send_subneg(int fd, unsigned char command, const unsigned char *values, size_t count)
+/* Abandon a subnegotiation whose payload has overrun the buffer, and go back to reading
+ * data. Both ways into the overrun end here so that the recovery is expressed once.
+ *
+ * Returning to DATA is what enforces "never act on a truncated payload" - handle_subneg is
+ * only reached from the subnegotiation states, and this leaves them. A flag saying the same
+ * thing was kept here as well, and it could not be read: it was cleared at the next IAC SB
+ * and handle_subneg could not be entered in between. Two mechanisms for one rule, one of
+ * them dead, is worse than one - a reader trusts the guard and may then weaken the thing
+ * that actually does the work. */
+static void subneg_abandon(telnet_t *telnet)
+{
+    telnet->subneg_length = 0;
+    telnet->state = TELNET_STATE_DATA;
+
+    /* Bounded by construction: reaching here again costs the peer a fresh IAC SB and
+     * another full buffer, so the warning cannot be produced faster than once per 65
+     * bytes - and a stream desynchronised enough to do that repeatedly is already the
+     * louder problem. */
+    tio_warning_printf("Discarded an oversized subnegotiation from the peer");
+}
+
+/* Returns whether the whole message reached the peer, AND records the failure on the
+ * session. Both, because the two roles need different things from it: a client asking for a
+ * break or a line change reports the failure to the user who asked, while the server
+ * answering a request has no user to tell and needs the peer dropped instead. Returning it
+ * only was the gap - every server call site discarded the bool, so the answer path had the
+ * send timeout and none of the recovery. */
+static bool send_subneg(telnet_t *telnet, int fd, unsigned char command, const unsigned char *values, size_t count)
 {
     unsigned char message[8 + 2 * 4];
     size_t at = 0;
@@ -225,7 +336,13 @@ static void send_subneg(int fd, unsigned char command, const unsigned char *valu
     message[at++] = IAC;
     message[at++] = SE;
 
-    net_send_raw(fd, message, at);
+    if (net_send_raw(fd, message, at) != (ssize_t) at)
+    {
+        telnet->write_failed = true;
+        return false;
+    }
+
+    return true;
 }
 
 static unsigned char parity_value(parity_t parity)
@@ -276,35 +393,54 @@ void telnet_send_port_settings(telnet_t *telnet, int fd)
      * inbound check rejects it, and RFC 2217 reserves zero on all four setting
      * commands for "report the current value", so sending it would ask a
      * question rather than hang the far end up. */
+    /* Assigned only after send_subneg confirms delivery, in all four blocks below - a v11
+     * cold review found the cache advancing first, discarding the bool the way every
+     * pre-existing server call site once did (see the comment on send_subneg's declaration).
+     * A setting that never left the machine still set the cache to match what was asked for,
+     * so the guard above a later attempt at the same value saw no difference and never
+     * retried - silently, for the rest of the session. Measured: flood a client's send
+     * buffer so the natural once-only send fails, then force a second attempt with an
+     * unrelated keystroke (tty_reconfigure() calls this on every settings change in socket
+     * mode) once the buffer clears - the named rate never crossed the wire on either
+     * attempt. `telnet_set_line` and `telnet_send_break` already followed this rule; this
+     * function was the one place that did not. */
     if (option.baudrate_set && (telnet->requested_baudrate != option.baudrate))
     {
-        telnet->requested_baudrate = option.baudrate;
         values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
         values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
         values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
         values[3] = (unsigned char) ((unsigned int) option.baudrate);
-        send_subneg(fd, COM_SET_BAUDRATE, values, 4);
+        if (send_subneg(telnet, fd, COM_SET_BAUDRATE, values, 4))
+        {
+            telnet->requested_baudrate = option.baudrate;
+        }
     }
 
     if (option.databits_set && (telnet->requested_databits != option.databits))
     {
-        telnet->requested_databits = option.databits;
         values[0] = (unsigned char) option.databits;
-        send_subneg(fd, COM_SET_DATASIZE, values, 1);
+        if (send_subneg(telnet, fd, COM_SET_DATASIZE, values, 1))
+        {
+            telnet->requested_databits = option.databits;
+        }
     }
 
     if (option.parity_set && (telnet->requested_parity != parity_value(option.parity)))
     {
-        telnet->requested_parity = parity_value(option.parity);
-        values[0] = (unsigned char) telnet->requested_parity;
-        send_subneg(fd, COM_SET_PARITY, values, 1);
+        values[0] = (unsigned char) parity_value(option.parity);
+        if (send_subneg(telnet, fd, COM_SET_PARITY, values, 1))
+        {
+            telnet->requested_parity = values[0];
+        }
     }
 
     if (option.stopbits_set && (telnet->requested_stopbits != option.stopbits))
     {
-        telnet->requested_stopbits = option.stopbits;
         values[0] = (unsigned char) option.stopbits;
-        send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+        if (send_subneg(telnet, fd, COM_SET_STOPSIZE, values, 1))
+        {
+            telnet->requested_stopbits = option.stopbits;
+        }
     }
 }
 
@@ -313,33 +449,46 @@ bool telnet_serial_control(const telnet_t *telnet)
     return telnet->local_enabled[OPT_COM_PORT];
 }
 
-bool telnet_send_break(telnet_t *telnet, int fd)
+telnet_request_t telnet_send_break(telnet_t *telnet, int fd)
 {
     unsigned char value;
 
     if (!telnet_serial_control(telnet))
     {
-        return false;
+        return TELNET_REQUEST_UNAVAILABLE;
     }
 
     value = CONTROL_BREAK_ON;
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(telnet, fd, COM_SET_CONTROL, &value, 1))
+    {
+        /* Return before the wait and before the release. Sleeping for a break that was
+         * never asserted only delays the caller, and releasing one costs another failed
+         * send to say nothing. */
+        return TELNET_REQUEST_FAILED;
+    }
 
     usleep(BREAK_DURATION_US);
 
     value = CONTROL_BREAK_OFF;
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(telnet, fd, COM_SET_CONTROL, &value, 1))
+    {
+        /* Worse than failing to start one: the peer was asked to assert a break and
+         * never asked to stop, so the remote line stays broken until the session ends.
+         * Reported as a failure so the caller says so rather than reporting a break
+         * that ended. */
+        return TELNET_REQUEST_FAILED;
+    }
 
-    return true;
+    return TELNET_REQUEST_SENT;
 }
 
-bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line)
+telnet_request_t telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line)
 {
     unsigned char value;
 
     if (!telnet_serial_control(telnet))
     {
-        return false;
+        return TELNET_REQUEST_UNAVAILABLE;
     }
 
     if (line == TELNET_LINE_DTR)
@@ -351,9 +500,12 @@ bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_l
         value = assert_line ? CONTROL_RTS_ON : CONTROL_RTS_OFF;
     }
 
-    send_subneg(fd, COM_SET_CONTROL, &value, 1);
+    if (!send_subneg(telnet, fd, COM_SET_CONTROL, &value, 1))
+    {
+        return TELNET_REQUEST_FAILED;
+    }
 
-    return true;
+    return TELNET_REQUEST_SENT;
 }
 
 static void report_setting(const char *name, long applied, long wanted)
@@ -419,8 +571,15 @@ static void handle_com_port_response(const telnet_t *telnet)
         case COM_SET_BAUDRATE + SERVER_OFFSET:
             if (telnet->subneg_length >= 6)
             {
-                long applied = ((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
-                               ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5];
+                /* Accumulated unsigned. A byte of 0x80 or more shifted into bit 31 of a
+                 * signed 32-bit type overflows it, which is undefined rather than
+                 * merely negative - and `long` is 32 bits wherever tio is built for a
+                 * 32-bit target, which for a serial tool is most of them. Any baud rate
+                 * at or above 2147483648 carries such a byte. */
+                long applied = (long) (((uint32_t) telnet->subneg[2] << 24)
+                                     | ((uint32_t) telnet->subneg[3] << 16)
+                                     | ((uint32_t) telnet->subneg[4] << 8)
+                                     | (uint32_t) telnet->subneg[5]);
                 report_setting("baud rate", applied, telnet->requested_baudrate);
             }
             break;
@@ -556,7 +715,7 @@ static void control_apply(unsigned char request)
     switch (request)
     {
         case CONTROL_BREAK_ON:
-            tty_apply_break();
+            tty_apply_break(true);
             break;
 
         case CONTROL_FLOW_NONE:
@@ -609,8 +768,14 @@ static unsigned char control_state(unsigned char request)
         case CONTROL_GROUP_FLOW_OUT:
             /* What the port is at now, which after an apply is what it took and
              * not necessarily what was asked for - the same rule as every other
-             * setting. Read back rather than remembered, so a mode the device
-             * refused is reported as refused. */
+             * setting.
+             *
+             * Remembered, not read back: tty_flow_control_value() maps option.flow. The
+             * answer is still honest because tty_apply_flow() rolls option.flow back when
+             * verification fails, so a mode the device refused is never recorded as
+             * adopted - but the honesty lives there and not here. This comment used to
+             * claim a read-back, which is what tty_line_asserted() does with TIOCMGET two
+             * functions further down; it was describing the wrong function. */
             return (unsigned char) tty_flow_control_value();
 
         case CONTROL_GROUP_FLOW_IN:
@@ -637,7 +802,9 @@ static unsigned char control_state(unsigned char request)
     }
 }
 
-static void handle_com_port_request(const telnet_t *telnet, int fd)
+/* Not const any more: answering a request can fail to reach the peer, and that failure is
+ * recorded on the session for the connection's owner to act on. */
+static void handle_com_port_request(telnet_t *telnet, int fd)
 {
     unsigned char command;
     unsigned char values[4];
@@ -655,15 +822,23 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
         case COM_SET_BAUDRATE:
             if (telnet->subneg_length >= 6)
             {
-                int asked = (int) (((long) telnet->subneg[2] << 24) | ((long) telnet->subneg[3] << 16) |
-                                   ((long) telnet->subneg[4] << 8) | (long) telnet->subneg[5]);
+                /* Unsigned for the same reason as the answer path above. The conversion
+                 * to int that follows is implementation-defined for a value past
+                 * INT_MAX rather than undefined, and tty_apply_baudrate rejects
+                 * whatever it produces through tty_baudrate_acceptable - so a peer
+                 * sending 0xFFFFFFFF gets its request refused, not a shift that the
+                 * compiler was free to assume could not happen. */
+                int asked = (int) (((uint32_t) telnet->subneg[2] << 24)
+                                 | ((uint32_t) telnet->subneg[3] << 16)
+                                 | ((uint32_t) telnet->subneg[4] << 8)
+                                 | (uint32_t) telnet->subneg[5]);
 
                 applied = tty_apply_baudrate(asked);
                 values[0] = (unsigned char) ((unsigned int) applied >> 24);
                 values[1] = (unsigned char) ((unsigned int) applied >> 16);
                 values[2] = (unsigned char) ((unsigned int) applied >> 8);
                 values[3] = (unsigned char) applied;
-                send_subneg(fd, COM_SET_BAUDRATE + SERVER_OFFSET, values, 4);
+                send_subneg(telnet, fd, COM_SET_BAUDRATE + SERVER_OFFSET, values, 4);
             }
             break;
 
@@ -671,7 +846,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
             if (telnet->subneg_length >= 3)
             {
                 values[0] = (unsigned char) tty_apply_databits(telnet->subneg[2]);
-                send_subneg(fd, COM_SET_DATASIZE + SERVER_OFFSET, values, 1);
+                send_subneg(telnet, fd, COM_SET_DATASIZE + SERVER_OFFSET, values, 1);
             }
             break;
 
@@ -697,7 +872,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                 }
 
                 values[0] = parity_value(got);
-                send_subneg(fd, COM_SET_PARITY + SERVER_OFFSET, values, 1);
+                send_subneg(telnet, fd, COM_SET_PARITY + SERVER_OFFSET, values, 1);
             }
             break;
 
@@ -705,7 +880,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
             if (telnet->subneg_length >= 3)
             {
                 values[0] = (unsigned char) tty_apply_stopbits(telnet->subneg[2]);
-                send_subneg(fd, COM_SET_STOPSIZE + SERVER_OFFSET, values, 1);
+                send_subneg(telnet, fd, COM_SET_STOPSIZE + SERVER_OFFSET, values, 1);
             }
             break;
 
@@ -723,7 +898,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                  * out here, so a served socket could not be opened by it at all
                  * - the one thing the option exists for. */
                 values[0] = control_state(request);
-                send_subneg(fd, COM_SET_CONTROL + SERVER_OFFSET, values, 1);
+                send_subneg(telnet, fd, COM_SET_CONTROL + SERVER_OFFSET, values, 1);
             }
             break;
 
@@ -752,7 +927,7 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                  * undefined value - or one whose flush failed - that it had been
                  * carried out. */
                 values[0] = done;
-                send_subneg(fd, COM_PURGE_DATA + SERVER_OFFSET, values, 1);
+                send_subneg(telnet, fd, COM_PURGE_DATA + SERVER_OFFSET, values, 1);
             }
             break;
 
@@ -761,15 +936,10 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
     }
 }
 
-static void handle_subneg(const telnet_t *telnet, int fd)
+/* Not const either, for the same reason as handle_com_port_request below it: the answer it
+ * dispatches can fail to reach the peer, and that is recorded on the session. */
+static void handle_subneg(telnet_t *telnet, int fd)
 {
-    if (telnet->subneg_overflow)
-    {
-        /* A payload longer than anything this speaks; acting on a truncated
-         * one would be worse than ignoring it */
-        return;
-    }
-
     if ((telnet->subneg_length < 1) || (telnet->subneg[0] != OPT_COM_PORT))
     {
         return;
@@ -813,26 +983,26 @@ void telnet_server_offer(telnet_t *telnet, int fd)
     telnet->engaged = true;
     /* Binary in both directions so the high bit of a serial byte survives,
      * and the serial-port option so a client can configure the device */
-    send_command(fd, WILL, OPT_BINARY);
-    telnet->local_enabled[OPT_BINARY] = true;
-    telnet->local_answered[OPT_BINARY] = true;
+    send_command(telnet, fd, WILL, OPT_BINARY);
+    telnet->local_sent[OPT_BINARY] = true;
 
-    send_command(fd, DO, OPT_BINARY);
-    telnet->remote_enabled[OPT_BINARY] = true;
-    telnet->remote_answered[OPT_BINARY] = true;
+    send_command(telnet, fd, DO, OPT_BINARY);
+    telnet->remote_sent[OPT_BINARY] = true;
 
-    send_command(fd, DO, OPT_COM_PORT);
+    send_command(telnet, fd, DO, OPT_COM_PORT);
 
-    /* Record that the offer was made, so the client's answer is read as an answer
-     * rather than as an unsolicited offer needing one - which is what drew a
-     * second DO for the same option on every negotiated session.
+    /* Record that each offer was made, so the client's answer is read as an answer
+     * rather than as an unsolicited offer needing one - which is what drew a second DO
+     * for the same option on every negotiated session.
      *
-     * Deliberately NOT remote_enabled/remote_answered, which the two lines above
-     * do set for binary. remote_enabled[OPT_COM_PORT] is the test that refuses
-     * serial requests from a client that never took the option; asserting it here
-     * would mean a client that ignores the offer and sends requests anyway gets
-     * them honoured. Asking is not being answered. */
-    telnet->com_port_do_sent = true;
+     * Recording the offer and NOT the agreement, for all three. remote_enabled and
+     * local_enabled stay false until the peer says so: remote_enabled[OPT_COM_PORT] is
+     * the test that refuses serial requests from a client that never took the option, and
+     * asserting it here would honour requests from a client that ignored the offer
+     * entirely. Asking is not being answered. Binary used to be the exception - it
+     * claimed both directions were live the moment its commands went out - and it was the
+     * only reason those two slots ever disagreed with the wire. */
+    telnet->remote_sent[OPT_COM_PORT] = true;
 }
 
 static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
@@ -869,11 +1039,11 @@ static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsig
      * put three protocol bytes in front of a peer that speaks no protocol, and
      * tio's own socket server forwards whatever it is sent straight to the
      * serial device, so those bytes would land on somebody's console. */
-    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_will_sent
+    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->local_sent[OPT_COM_PORT]
             && !telnet->local_answered[OPT_COM_PORT])
     {
-        telnet->com_port_will_sent = true;
-        send_command(fd, WILL, OPT_COM_PORT);
+        telnet->local_sent[OPT_COM_PORT] = true;
+        send_command(telnet, fd, WILL, OPT_COM_PORT);
     }
 }
 
@@ -924,7 +1094,6 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                      * by accident, so this settles that the peer speaks Telnet */
                     telnet->engaged = true;
                     telnet->subneg_length = 0;
-                    telnet->subneg_overflow = false;
                     telnet->state = TELNET_STATE_SUBNEG;
                 }
                 else
@@ -954,7 +1123,21 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                 }
                 else
                 {
-                    telnet->subneg_overflow = true;
+                    /* Give up on this subnegotiation rather than keep waiting for a
+                     * terminator.
+                     *
+                     * Waiting was unbounded: a peer that never sends IAC SE keeps this
+                     * state forever, and every byte after it is consumed as payload, so
+                     * the device's output stops arriving and nothing says why. The
+                     * subnegotiation is already unrecoverable at this point - the bytes
+                     * that would have been parsed are past the end of the buffer, so no
+                     * terminator can rescue it - which makes continuing to wait a way to
+                     * lose more for no possible gain.
+                     *
+                     * The cost of abandoning it is that the trailing payload shows up as
+                     * data, on a stream that is already desynchronised. That is bounded
+                     * and visible, where the alternative is neither. */
+                    subneg_abandon(telnet);
                 }
                 break;
 
@@ -971,12 +1154,16 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
                     if (telnet->subneg_length < sizeof(telnet->subneg))
                     {
                         telnet->subneg[telnet->subneg_length++] = byte;
+                        telnet->state = TELNET_STATE_SUBNEG;
                     }
                     else
                     {
-                        telnet->subneg_overflow = true;
+                        /* The escaped-byte path into the same overrun, so it takes the
+                         * same exit. Note this one must NOT fall through to
+                         * TELNET_STATE_SUBNEG afterwards, which is why the state
+                         * assignment moved inside the branch above. */
+                        subneg_abandon(telnet);
                     }
-                    telnet->state = TELNET_STATE_SUBNEG;
                 }
                 break;
         }
@@ -988,6 +1175,14 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
 ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t count)
 {
     const unsigned char *input = (const unsigned char *) buffer;
+    /* Two bytes out per byte in, worst case, because every byte could be a marker.
+     *
+     * Sized against BUFSIZ rather than the caller's count so the bound is a property of
+     * this function rather than of whoever called it, and the loop below stops on the
+     * buffer as well as on the input. It is a 16 KB stack frame taken once per call, and
+     * socket_write() calls this per device byte - a stack-pointer adjustment with no
+     * memset, so it costs nothing to speak of, but worth knowing it is here before
+     * building with stack probing or shrinking a thread stack. */
     unsigned char escaped[2 * BUFSIZ];
     size_t consumed = 0;
     size_t produced = 0;
@@ -1020,17 +1215,21 @@ ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t c
     {
         ssize_t status = net_send_raw(fd, escaped + sent, produced - sent);
 
-        if (status < 0)
-        {
-            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
-            {
-                /* Nothing has gone wrong with the stream, so carry on from
-                 * where this stopped. Giving up here is what left a doubled
-                 * marker split down the middle. */
-                continue;
-            }
-        }
-
+        /* Deliberately no retry on EINTR or EAGAIN here, which is worth saying because
+         * this loop used to have one and it looked obviously right.
+         *
+         * EINTR cannot arrive: net_send_raw absorbs it itself, so it never returns -1
+         * with that errno. EAGAIN can, and it does not mean "try again" - net_send_raw
+         * returns it only after the send timeout has expired SEND_MAX_STALLED times
+         * with no progress at all, which is its verdict that the peer has stopped
+         * reading and should be shed. Retrying that restarted the budget from the top,
+         * so the bound became unbounded: exactly the failure net_send_raw's own comment
+         * describes one level further down, reintroduced above it.
+         *
+         * The split-marker case the retry was added for is handled by the whole-byte
+         * accounting below, which reports only caller-bytes whose escaped form went out
+         * complete. That is what keeps a doubled marker from being cut in half - not
+         * the retry. */
         if (status <= 0)
         {
             /* Report the caller's bytes whose escaped form went out in full,

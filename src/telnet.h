@@ -68,17 +68,45 @@ typedef struct
     unsigned char pending_command;
     bool engaged;
 
-    // Whether this side has already sent WILL for the serial-port option, and
-    // whether it has already sent DO. Two flags rather than one, because they are
-    // opposite commitments: WILL offers to provide the option, DO asks the peer to.
-    // Sharing a flag made a server that had sent DO suppress the WILL it owed a
-    // client that asked - the answer that says the option is available at all.
+    // A write to this peer could not be delivered. Recorded rather than returned because the
+    // negotiation and answer paths have no local remedy - the useful response to a peer that
+    // will not take its own answers is to stop having it, and only the code that owns the
+    // connection can do that. Set by send_command and send_subneg, read by the owner after
+    // telnet_filter_input returns; see telnet_write_failed().
+    bool write_failed;
+
+    // Whether this side has spoken first about an option, per option and per
+    // direction: local_sent for a WILL we offered, remote_sent for a DO we asked.
+    // Two arrays rather than one, because they are opposite commitments - WILL
+    // offers to provide the option, DO asks the peer to - and sharing a flag made a
+    // server that had sent DO suppress the WILL it owed a client that asked.
+    //
+    // FIRST is the whole of it: answering a peer does not set these. A DO sent to
+    // agree with a peer's WILL leaves remote_sent false, because the guards that
+    // read these ask "is an unanswered request of ours outstanding" and an answer is
+    // not a request. Naming them for the command they hold rather than for any
+    // message sent would read better in isolation and worse where it matters - the
+    // local_/remote_ prefix already means "about our side" and "about the peer's",
+    // as it does on enabled and answered, and these follow it.
+    //
+    // They are also live state and not a property of the role, which is why there is
+    // no predicate over (role, option) here instead. A client's WILL for the
+    // serial-port option is sent lazily, once, only after the peer has shown it
+    // speaks Telnet; "may this role offer this option" cannot express "and has it
+    // yet", so the record has to exist either way.
+    //
+    // Per option rather than per named option. These were two bools for the
+    // serial-port option alone, which meant every other option's first word had no
+    // record and the guards that use these carried an `opt == OPT_COM_PORT` test to
+    // say so. That left binary asserting agreement it had not received, because the
+    // only way to avoid re-answering a peer was to claim the option was already
+    // live. One array removes both the special case and the claim.
     //
     // A client is otherwise purely reactive, which leaves it silent against a
     // server that waits to be asked; its WILL is only sent once the peer has shown
     // it speaks Telnet, so a raw peer is still never written to unasked.
-    bool com_port_will_sent;
-    bool com_port_do_sent;
+    bool local_sent[TELNET_OPTION_COUNT];
+    bool remote_sent[TELNET_OPTION_COUNT];
 
     // What has been settled for each option, and whether it has been answered
     // at all. Both are needed: an unanswered request must be answered even when
@@ -92,7 +120,6 @@ typedef struct
 
     unsigned char subneg[TELNET_SUBNEG_MAX];
     size_t subneg_length;
-    bool subneg_overflow;
 
     // What was last asked of the remote port, kept so that the server's answer
     // can be compared against it. A server is entitled to answer with a
@@ -135,6 +162,22 @@ void telnet_server_offer(telnet_t *telnet, int fd);
 // Telnet cannot be talked into it by the bytes that arrive.
 bool telnet_engaged(const telnet_t *telnet);
 
+// Whether a write to this peer failed to be delivered. Check it after
+// telnet_filter_input(), beside the read-error handling: answering a peer happens from the
+// read path, so a peer that cannot take its answers is discovered there and nowhere else. A
+// caller that ignores this gets the send timeout's bound without its recovery, which lets
+// such a peer stall the device loop once per message for as long as it keeps asking.
+//
+// All three callers check it, and that is deliberate rather than defensive on all of them.
+// It used to be defensive on two: the client socket carried no send timeout, so this could
+// only fire there for a real error, and the comment said so - a fact about net_connect() in
+// a different file, bet on rather than enforced here. The bet was lost the day a timeout was
+// added to the client socket, and it was lost silently: a v11 cold review found three stale
+// copies of the same claim elsewhere before this one was corrected. The client's write path
+// (device_sync in tty.c) now depends on this flag being checked for exactly the reason this
+// paragraph used to warn about.
+bool telnet_write_failed(const telnet_t *telnet);
+
 // True when the peer took the serial-port option, which is what decides
 // whether an operation needing a serial line can be carried to it at all
 bool telnet_serial_control(const telnet_t *telnet);
@@ -144,13 +187,26 @@ bool telnet_serial_control(const telnet_t *telnet);
 // the same buffer. Returns how many data bytes are left.
 size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count);
 
-// Ask the remote port for a break. Returns false when the peer never took the
-// serial-port option, leaving the caller to report the operation unavailable.
-bool telnet_send_break(telnet_t *telnet, int fd);
+// What became of a request to the remote port. Three outcomes rather than a bool,
+// because "the session cannot carry this" and "the session could not deliver it" want
+// different words to the user and, more importantly, different bookkeeping: a request
+// that was never delivered must leave the caller's idea of the remote state alone.
+// Collapsing them is what let a failed line request be recorded as a state change.
+typedef enum
+{
+    TELNET_REQUEST_SENT,
+    TELNET_REQUEST_UNAVAILABLE,
+    TELNET_REQUEST_FAILED,
+} telnet_request_t;
 
-// Drive a modem control line on the remote port. Returns false on a peer that
-// did not take the serial-port option.
-bool telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line);
+// Ask the remote port for a break. UNAVAILABLE when the peer never took the
+// serial-port option, leaving the caller to report the operation unavailable.
+telnet_request_t telnet_send_break(telnet_t *telnet, int fd);
+
+// Drive a modem control line on the remote port. UNAVAILABLE on a peer that did not
+// take the serial-port option; FAILED when the request could not be delivered, in which
+// case the line did not move and no cached state may be advanced.
+telnet_request_t telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, bool assert_line);
 
 // Carry the serial settings to the remote port. Does nothing when the peer
 // declined the serial-port option, which leaves the session a plain byte

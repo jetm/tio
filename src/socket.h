@@ -28,6 +28,11 @@
 void socket_configure(void);
 void socket_write(char input_char);
 int socket_add_fds(fd_set *fds, bool connected);
+// Accept any connection waiting on the listening socket. For a caller that has no device
+// yet and therefore no use for client input - it takes no buffer, so there is none to pass
+// as NULL into the client-read path.
+void socket_accept_pending(fd_set *rdfs);
+
 bool socket_handle_input(fd_set *fds, char *output_char);
 
 // Apply the INLCR/IGNCR/ICRNL input mappings in software, for data arriving

@@ -38,7 +38,6 @@
 #include "tty.h"
 
 #define MAX_SOCKET_CLIENTS 16
-#define SOCKET_PORT_DEFAULT 3333
 
 static int sockfd;
 static int clientfds[MAX_SOCKET_CLIENTS];
@@ -48,7 +47,7 @@ static int clientfds[MAX_SOCKET_CLIENTS];
  * first decide what the second receives */
 static telnet_t clienttelnet[MAX_SOCKET_CLIENTS];
 static int socket_family = AF_UNSPEC;
-static int port_number = SOCKET_PORT_DEFAULT;
+static int port_number = NET_PORT_DEFAULT;
 
 static int socket_client_count(void)
 {
@@ -71,26 +70,40 @@ static const char *socket_filename(void)
     return option.socket + 5;
 }
 
+/* Through net_parse_port, not atoi. This is the same option syntax the client side
+ * parses, and it already had a parser that validates; atoi() reports nothing, so
+ * `--socket inet:htpp` listened on 3333, `inet:99999` announced 99999 and listened on
+ * 34463 once the 16-bit port field cut its high bits off, and `inet:8080x` quietly became
+ * 8080. Announcing a port it is not listening on is the worst of the three, because the
+ * operator's own evidence is then the thing misleading them.
+ *
+ * An ABSENT port is not one of those, and it is handled here rather than in the parser
+ * because the two callers mean different things by "empty". For the server the port is the
+ * whole remainder of the option, so nothing there means no port was given, which
+ * tio.1 documents as the default: `--socket inet:` has listened on 3333 for as long as the
+ * option has existed. The client only reaches the parser with text that followed a colon,
+ * where empty means a colon was typed with nothing behind it and an error is right. Putting
+ * the default in the parser would make it substitute one for `inet:host:` too. */
+static int socket_port_or_default(const char *remainder)
+{
+    if (remainder[0] == '\0')
+    {
+        return NET_PORT_DEFAULT;
+    }
+
+    return (int) net_parse_port(remainder, option.socket);
+}
+
 static int socket_inet_port(void)
 {
     /* skip 'inet:' */
-    int port = atoi(option.socket + 5);
-    if (port == 0)
-    {
-        port = SOCKET_PORT_DEFAULT;
-    }
-    return port;
+    return socket_port_or_default(option.socket + 5);
 }
 
 static int socket_inet6_port(void)
 {
     /* skip 'inet6:' */
-    int port = atoi(option.socket + 6);
-    if (port == 0)
-    {
-        port = SOCKET_PORT_DEFAULT;
-    }
-    return port;
+    return socket_port_or_default(option.socket + 6);
 }
 
 static void socket_exit(void)
@@ -167,30 +180,21 @@ void socket_configure(void)
         }
     }
 
+    /* No range test on what these return. Both go through net_parse_port, which reports and
+     * exits on anything outside 0-65535, so a negative can no longer arrive here - the two
+     * checks that used to sit below these calls were left over from atoi() and were
+     * unreachable. Ten lines of validation that cannot fire is worse than none: it reads as
+     * the place where the range is enforced, so a later change to the parser looks safe. */
     if (strncmp(option.socket, "inet:", 5) == 0)
     {
         socket_family = AF_INET;
-
         port_number = socket_inet_port();
-
-        if (port_number < 0)
-        {
-            tio_error_printf("Invalid port number: %d", port_number);
-            exit(EXIT_FAILURE);
-        }
     }
 
     if (strncmp(option.socket, "inet6:", 6) == 0)
     {
         socket_family = AF_INET6;
-
         port_number = socket_inet6_port();
-
-        if (port_number < 0)
-        {
-            tio_error_printf("Invalid port number: %d", port_number);
-            exit(EXIT_FAILURE);
-        }
     }
 
     if (socket_family == AF_UNSPEC)
@@ -378,16 +382,35 @@ bool socket_map_input_char(char *character)
     return true;
 }
 
-bool socket_handle_input(fd_set *rdfs, char *output_char)
+/* Accept whatever is waiting, and nothing else.
+ *
+ * Split out of socket_handle_input because the two callers want different halves of it.
+ * device_wait() runs while there is no device and wants only this: it used to call
+ * socket_handle_input(&rdfs, NULL), and the client-read loop below dereferences that pointer
+ * with no check. It never crashed, but only because socket_add_fds(&rdfs, false) leaves client
+ * descriptors out of the set while disconnected - so the safety of a null dereference here
+ * rested on a decision in another file, and the day that decision changes there is nothing at
+ * this end to catch it. With the halves separate there is no pointer to pass. */
+void socket_accept_pending(fd_set *rdfs)
 {
     if (!option.socket)
     {
-        return false;
+        return;
     }
 
     if (FD_ISSET(sockfd, rdfs))
     {
         int clientfd = accept(sockfd, NULL, NULL);
+
+        /* Once, at the top, rather than at each step that touches the descriptor. Two of
+         * the steps below tested it and the refusal further down did not, so a failed
+         * accept() reached net_send_raw(-1, ...) and close(-1) - harmless, and the kind of
+         * inconsistency that stops being harmless when a fourth step is added and nobody
+         * notices which of its neighbours check. */
+        if (clientfd < 0)
+        {
+            return;
+        }
 
         /* Suppress SIGPIPE on this connection the way the client and the
          * listening socket already do. Every write to a client goes to a
@@ -395,7 +418,6 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
          * from the listener would make the whole server path depend on a
          * platform detail rather than on a call. */
 #if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-        if (clientfd >= 0)
         {
             int optval = 1;
             if (setsockopt(clientfd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval)))
@@ -404,6 +426,43 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
             }
         }
 #endif
+
+        /* Outside the SO_NOSIGPIPE guard above: that one is a platform detail, this one
+         * applies everywhere. Nesting it inside was worth catching - it would have left
+         * the stall unbounded on exactly the platforms that define MSG_NOSIGNAL, which is
+         * every Linux target. */
+        {
+            /* Bound how long this client can hold the device read path.
+             *
+             * socket_write() sends to every client from that path with a blocking send,
+             * so a client whose receive window has filled stops the whole server: the
+             * device goes unread, the other clients get nothing, and the serial port
+             * keeps producing into a buffer nobody drains. Measured without this, one
+             * client that simply never called recv starved a second, healthy client of
+             * every byte for eight seconds.
+             *
+             * A send timeout turns that unbounded wait into a bounded one, and
+             * net_send_raw's retry budget turns a repeatedly-timing-out send into a
+             * failure that socket_write already knows how to handle - it drops the
+             * client. The two are one mechanism: the timeout alone would be retried
+             * forever, and the budget alone has nothing to count.
+             *
+             * SEND_TIMEOUT_MS times SEND_MAX_STALLED is the worst case a stalled client
+             * can cost everyone else, once, before it is shed. */
+            struct timeval sndtimeo = {
+                .tv_sec = SEND_TIMEOUT_MS / 1000,
+                .tv_usec = (SEND_TIMEOUT_MS % 1000) * 1000,
+            };
+
+            if (setsockopt(clientfd, SOL_SOCKET, SO_SNDTIMEO, &sndtimeo, sizeof(sndtimeo)))
+            {
+                /* Not fatal: without it this client can still stall the others, which is
+                 * the behaviour that shipped before. Worth saying so rather than leaving
+                 * the operator to infer it from a hang. */
+                tio_warning_printf("Could not bound this client's send timeout (%s); a client that stops reading can stall the session",
+                        strerror(errno));
+            }
+        }
 
         if (option.socket_rfc2217 && socket_client_count() > 0)
         {
@@ -444,6 +503,17 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
             }
         }
     }
+}
+
+bool socket_handle_input(fd_set *rdfs, char *output_char)
+{
+    if (!option.socket)
+    {
+        return false;
+    }
+
+    socket_accept_pending(rdfs);
+
     for (int i = 0; i != MAX_SOCKET_CLIENTS; ++i)
     {
         if (clientfds[i] != -1 && FD_ISSET(clientfds[i], rdfs))
@@ -468,7 +538,28 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
              * has always been, in both directions, and a client cannot reach the
              * serial port's configuration by sending bytes that happen to look
              * like protocol. */
-            if (telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1) == 0)
+            size_t kept = telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1);
+
+            /* Answering this client happens inside the filter above, from this read path, so
+             * a client that cannot take its own answers is discovered here and nowhere else.
+             * Drop it, beside the read-error close a few lines up.
+             *
+             * Without this the send timeout bounded each answer and nothing ended the
+             * sequence: a peer with a floored receive buffer that never reads and streams
+             * SET-BAUDRATE requests spent the server's whole budget per answer, stayed
+             * connected, and did it again - measured at 1,331,986 requests with the peer
+             * still attached. Under --socket-rfc2217 it also holds the only slot while doing
+             * it, so there is no second client left to notice. */
+            if (telnet_write_failed(&clienttelnet[i]))
+            {
+                tio_error_printf_silent("Could not answer socket client, dropping it (%s)",
+                        strerror(errno));
+                close(clientfds[i]);
+                clientfds[i] = -1;
+                return false;
+            }
+
+            if (kept == 0)
             {
                 return false;
             }

@@ -237,7 +237,11 @@ Map NL to CR-NL on output
 .IP "\fBOLTU"
 Map lowercase characters to uppercase on output
 .IP "\fBONULBRK"
-Map nul (zero) to send break signal on output
+Map nul (zero) to send break signal on output. On a socket served by
+\fB\-\-socket\fR this hands the break to any client that can reach the port: a
+NUL byte is data, so it needs no protocol, no negotiation and not
+\fB\-\-socket\-rfc2217\fR. Breaks arriving this way are rate limited like any
+other, but the door is open whenever this mapping is set.
 .IP "\fBOIGNCR"
 Ignore CR on output
 .P
@@ -295,6 +299,11 @@ terminal and all connected clients.
 
 Sockets remain open while the serial port is disconnected, and writes will block.
 
+A client that stops reading is disconnected rather than allowed to stall the
+session. Serial input is written to each client from the same loop that reads the
+port, so a client whose receive buffer has filled would otherwise hold up the
+port and every other client with it.
+
 Various socket types are supported using the following prefixes in the socket field:
 
 .RS
@@ -321,6 +330,13 @@ socket - baud rate, framing, break and the \fBDTR\fR and \fBRTS\fR lines - in
 the same way \fBtio\fR itself does when connecting to a socket target. Each
 request is answered with the setting the port ended up at, which is not the
 requested one when the port could not manage it.
+
+That check reads the setting back from the port, so it holds for framing, parity,
+flow control and any baud rate the platform has a constant for. It does not hold
+for an arbitrary rate: those are set through a platform helper that reports only
+whether it was accepted, and a driver that takes a rate it cannot actually
+generate is indistinguishable from one that can. A request for such a rate is
+answered as applied on the strength of that helper alone.
 
 Without this option the socket carries a raw byte stream and nothing is sent to
 a client unasked, which is the default and is what every existing client of
@@ -351,10 +367,19 @@ A socket set by \fB\-\-socket inet:\fR or \fB\-\-socket inet6:\fR is bound on
 every interface and asks nobody for a password. That is defensible while the
 socket carries bytes, because bytes are all a client can put on the line.
 Offering RFC 2217 over it is a different matter: any client that can reach the
-port can then set the baud rate, drop \fBDTR\fR and assert a break on the
-attached board, and a break on a Linux console is a SysRq key. Prefer
-\fB\-\-socket unix:\fR, which is protected by file permissions, or keep the port
-off any network the machine does not own.
+port can then set the baud rate, switch the flow control, drop \fBDTR\fR and
+assert a break on the attached board, and discard whatever the port has queued in
+either direction. A break on a Linux console is a SysRq key,
+and hardware flow control asked for on a board that does not drive \fBCTS\fR
+stops the console being written to at all - so the option is enough to wedge a
+line as well as to type on it. Prefer \fB\-\-socket unix:\fR, which is protected
+by file permissions, or keep the port off any network the machine does not own.
+
+Withholding \fB\-\-socket\-rfc2217\fR does not by itself close the break. With
+\fB\-\-map ONULBRK\fR set, a client's NUL byte asserts one with no protocol
+involved, so a deployment hardened by leaving the option off still hands out the
+one operation on this list that reboots a Linux console. That mapping and this
+option are separate doors to it.
 
 .TP
 .BR "    \-\-rfc2217"
@@ -440,6 +465,11 @@ Default value is "always".
 
 Execute shell command with I/O redirected to device
 
+The command's output goes to the connection directly, so tio cannot escape it. On
+a socket session speaking RFC 2217 the option is refused: a byte equal to the
+Telnet command marker would reach the peer bare, where it introduces a command
+rather than carrying data. A serial device and a plain socket are unaffected.
+
 .TP
 .BR "\-\-complete-profiles
 
@@ -512,8 +542,11 @@ found.
 
 What is reported as set is what the server says it applied, which is not always
 what was asked for: a port that cannot manage a setting is reported as not
-having taken it. On a plain socket these settings have no effect, since the
-connection carries bytes rather than driving a line.
+having taken it. An arbitrary baud rate is the exception - see
+\fB\-\-socket\-rfc2217\fR for why a server cannot verify one - and is reported as
+applied whenever the remote platform accepted it. On a plain socket these
+settings have no effect, since the connection carries bytes rather than driving a
+line.
 
 .PP
 A socket target reconnects on disconnect under the usual rules, so a session
@@ -718,6 +751,10 @@ Set input mode
 Set output mode
 .IP "\fBsocket"
 Set socket to redirect I/O to
+.IP "\fBrfc2217"
+Speak RFC 2217 to a socket target
+.IP "\fBsocket\-rfc2217"
+Offer RFC 2217 to clients of the socket
 .IP "\fBprefix-ctrl-key"
 Set prefix ctrl key (a..z or 'none', default: t)
 .IP "\fBrs-485"

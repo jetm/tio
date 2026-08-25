@@ -33,7 +33,28 @@ typedef struct
     socklen_t addrlen;
 } net_address_t;
 
+// The default port for an 'inet:' or 'inet6:' endpoint with no port given. Shared with
+// the socket server, which used to keep its own copy of the same number.
+#define NET_PORT_DEFAULT 3333
+
 bool net_target_is_socket(const char *target);
+
+// Parse a port from the text after 'inet:' or 'inet6:'. Returns the port; reports the
+// offending target and exits when the text is not a port, INCLUDING when it is empty.
+// `target` is the whole option value, for the error message.
+//
+// A literal 0 means the default, which is what tio.1 documents. An absent port also means
+// the default, but that is the CALLER's to decide and not this function's: the server
+// passes the whole remainder of its option, where empty means no port was given, while the
+// client only calls this with text that followed a colon, where empty means a colon with
+// nothing behind it. This header used to claim it substituted the default for an absent
+// port, which was false and cost `--socket inet:` its documented behaviour for a round.
+//
+// Shared with the socket server so that one option syntax has one parser. The server used
+// atoi(), which reports nothing at all: a non-numeric port became the default, an
+// out-of-range one was announced and then narrowed to a different port by the 16-bit port
+// field, and trailing garbage was ignored.
+long net_parse_port(const char *port_string, const char *target);
 
 // Parse and resolve a 'unix:', 'inet:' or 'inet6:' target and cache the
 // result. Reports the offending part and exits on a malformed target.
@@ -53,6 +74,17 @@ int net_connect(void);
 // Write to a connected socket without raising SIGPIPE when the peer is gone,
 // applying whatever the negotiated protocol requires on the way out
 ssize_t net_send(int fd, const void *buffer, size_t count);
+
+// How long a single send may stall on a socket that has a send timeout set, and how many
+// such stalls in a row are tolerated before the send is reported as failed. The two are
+// one mechanism and are defined together so that neither can be tuned without the other
+// in view: the timeout without the budget is retried forever, and the budget without the
+// timeout never counts anything because a blocking send does not return.
+//
+// Their product is the worst case that one client which has stopped reading can cost the
+// device read path, once, before the caller sheds it.
+#define SEND_TIMEOUT_MS   250
+#define SEND_MAX_STALLED  4
 
 // Write the bytes given and nothing else, for a caller that has already
 // applied that protocol and must not have it applied twice

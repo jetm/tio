@@ -176,7 +176,15 @@ static unsigned long rx_total = 0, tx_total = 0;
 static bool connected = false;
 static bool standard_baudrate = true;
 static void (*printchar)(char c);
-static int device_fd;
+/* -1 until a device is open, and -1 again once it is closed. Left at its default of 0 this
+ * named STDIN whenever no device was connected, and the key commands do not check that one
+ * is: ctrl-t shift-F before the first connection called tcflush(0) and announced "Flushed
+ * data I/O buffers", having flushed the user's own terminal, and ctrl-t L read modem lines
+ * off fd 0 - harmless against a pty, which has none to report, but tio run from a real
+ * serial terminal would report that terminal's lines as the device's. After a disconnect
+ * the danger is the same shape and worse aimed: the number belongs to whatever opened
+ * next. -1 makes every such use fail instead of landing somewhere. */
+static int device_fd = -1;
 static char hex_chars[2];
 static unsigned char hex_char_index = 0;
 static char tty_buffer[BUFSIZ*2];
@@ -271,15 +279,26 @@ bool device_sync(int fd)
         }
         if (count < 0)
         {
-            if (((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
+            /* Only the tty, and it is no longer true that the socket could not reach
+             * here blocking - a v11 cold review found that it can. net_send() now
+             * carries its own bounded retry against SO_SNDTIMEO, so EAGAIN out of it is
+             * not "no room yet", it is net_send_raw's verdict that the peer has stopped
+             * reading and the budget is spent. Retrying that here restarted the budget
+             * from the top on every poll cycle, which is the exact anti-pattern
+             * telnet_send's own comment describes refusing one level up - reintroduced
+             * here, one level down, because this loop was written before the socket
+             * had a bound to interact with. Measured before this guard: 119.2s and a
+             * failed write to exit, piping into a socket target whose peer never read;
+             * net_send_raw's own bound is ~1s. */
+            if ((device_mode == DEVICE_MODE_TTY)
+                    && ((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
                     && (--attempts > 0))
             {
                 /* A tty is opened non-blocking, so no room left in its transmit
                  * buffer is an ordinary outcome rather than a failure. Wait for
                  * the far end to take more and resume from where this stopped:
                  * returning here would drop the rest of a buffer the caller has
-                 * already been told was written. The socket is blocking, so this
-                 * branch belongs to the tty. */
+                 * already been told was written. */
                 struct pollfd fds = { .fd = fd, .events = POLLOUT, .revents = 0 };
                 poll(&fds, 1, FLUSH_POLL_MS);
                 continue;
@@ -478,8 +497,19 @@ void *tty_stdin_input_thread(void *arg)
                             {
                                 break;
                             }
-                            tio_printf("Flushed data I/O buffers")
-                            tcflush(device_fd, TCIOFLUSH);
+                            /* Announced after the fact, not before it. Printing first
+                             * meant the message was unconditional: pressed with no device
+                             * open it claimed to have flushed buffers while tcflush was
+                             * failing on a descriptor that named something else. */
+                            if (tcflush(device_fd, TCIOFLUSH) == 0)
+                            {
+                                tio_printf("Flushed data I/O buffers");
+                            }
+                            else
+                            {
+                                tio_warning_printf("Could not flush data I/O buffers (%s)",
+                                        strerror(errno));
+                            }
                             break;
                         default:
                             break;
@@ -569,6 +599,26 @@ bool device_serial_only(const char *operation)
     return true;
 }
 
+bool device_escaping(const char *operation)
+{
+    if ((device_mode != DEVICE_MODE_SOCKET) || !telnet_engaged(telnet_client()))
+    {
+        return false;
+    }
+
+    /* An operation that hands the connection's descriptor to something outside this
+     * program cannot be escaped on the way out, because nothing tio owns sees those
+     * bytes. execute_shell_command dup2s the descriptor onto a child's stdout, so a
+     * child emitting a byte equal to the command marker puts a bare marker on a session
+     * where a bare marker means a command - corrupting the stream rather than the
+     * output. Refusing is not a limitation of sockets: on a plain socket, and on a tty,
+     * there is no escaping to bypass and the operation is allowed. */
+    tio_warning_printf("%s writes straight to the connection, which would put unescaped bytes on an RFC 2217 session",
+            operation);
+
+    return true;
+}
+
 static const char *tty_line_name(int mask)
 {
     switch (mask)
@@ -640,12 +690,43 @@ void tty_line_set(int fd, tty_line_config_t line_config[])
     }
 }
 
-/* Put the current settings on the served device and say whether it took them.
- * The test is what the device reports back against what was asked of it, not
- * merely that something changed: a rate the device cannot manage still moves
- * the control flags, to B0, which would otherwise read as success while the
- * line was in fact hung up. */
-static bool tty_settings_took_effect(void)
+/* What each kind of request is answerable for. A request verifies its own bits and
+ * no others, because the answer names one setting: a device is within its rights to
+ * drop hardware flow control and keep everything else, and verifying the whole set
+ * on every request would report that device as refusing every parity and data-bits
+ * change on the port as well. Worse than the wrong message, the caller then rolls
+ * the accepted setting back, so a client asking for a parity the port took ends up
+ * with neither its parity nor an honest reason.
+ *
+ * CMSPAR belongs in the parity set because it is the only thing separating mark
+ * from odd and space from even. It is a Linux extension that drivers are free to
+ * drop, and when one does, a mark request comes back reading as plain odd - which
+ * without this passes the comparison and answers the client that the port is at
+ * mark parity while the line runs odd. That is the false success this whole
+ * function exists to catch. Where the platform has no such bit at all the local
+ * definition keeps this compiling, and the request then reads as not taken, which
+ * is the truth.
+ *
+ * Flow control is the one that straddles both flag words: hardware flow lives in
+ * c_cflag with the framing bits, software flow in c_iflag. Verifying only c_cflag
+ * would let a software-flow request report success having checked nothing at all.
+ *
+ * The baud rate carries no flag bits of its own - it is verified by the speed
+ * readback below, which is also what catches a rate the device cannot manage
+ * silently landing on B0 and hanging the line up. */
+#define TTY_VERIFY_BAUDRATE      0
+#define TTY_VERIFY_DATABITS      CSIZE
+#define TTY_VERIFY_STOPBITS      CSTOPB
+#define TTY_VERIFY_PARITY        (PARENB | PARODD | CMSPAR)
+#define TTY_VERIFY_FLOW          CRTSCTS
+#define TTY_VERIFY_FLOW_INPUT    (IXON | IXOFF | IXANY)
+
+/* Put the current settings on the served device and say whether it took the one
+ * being asked about. The test is what the device reports back against what was
+ * asked of it, not merely that something changed: a rate the device cannot manage
+ * still moves the control flags, to B0, which would otherwise read as success while
+ * the line was in fact hung up. */
+static bool tty_settings_took_effect(tcflag_t verified, tcflag_t verified_input)
 {
     struct termios check;
 
@@ -675,23 +756,6 @@ static bool tty_settings_took_effect(void)
     {
         return false;
     }
-
-    /* CMSPAR belongs in the mask because it is the only thing separating mark
-     * from odd and space from even. It is a Linux extension that drivers are
-     * free to drop, and when one does, a mark request comes back reading as
-     * plain odd - which without this passes the comparison and answers the
-     * client that the port is at mark parity while the line runs odd. That is
-     * the false success this function exists to catch. Where the platform has
-     * no such bit at all the local definition keeps this compiling, and the
-     * request then reads as not taken, which is the truth. */
-    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR | CRTSCTS;
-
-    /* Flow control straddles the two flag words: hardware flow lives in c_cflag
-     * with the framing bits above, software flow in c_iflag, which nothing here
-     * used to read. Verifying only c_cflag would let a software-flow request
-     * report success without checking anything at all - the same false success
-     * the CMSPAR bit is in the mask to prevent, one word over. */
-    const tcflag_t verified_input = IXON | IXOFF | IXANY;
 
     return ((check.c_cflag & verified) == (tio.c_cflag & verified))
             && ((check.c_iflag & verified_input) == (tio.c_iflag & verified_input));
@@ -757,7 +821,7 @@ int tty_apply_baudrate(int baudrate)
     }
 
     option.baudrate = baudrate;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_BAUDRATE, 0))
     {
         option.baudrate = previous;
         tty_reconfigure();
@@ -778,7 +842,7 @@ int tty_apply_databits(int databits)
     }
 
     option.databits = databits;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_DATABITS, 0))
     {
         option.databits = previous;
         tty_reconfigure();
@@ -799,7 +863,7 @@ int tty_apply_stopbits(int stopbits)
     }
 
     option.stopbits = stopbits;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_STOPBITS, 0))
     {
         option.stopbits = previous;
         tty_reconfigure();
@@ -819,7 +883,7 @@ flow_t tty_apply_flow(flow_t flow)
     }
 
     option.flow = flow;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_FLOW, TTY_VERIFY_FLOW_INPUT))
     {
         option.flow = previous;
         tty_reconfigure();
@@ -839,7 +903,7 @@ parity_t tty_apply_parity(parity_t parity)
     }
 
     option.parity = parity;
-    if (!tty_settings_took_effect())
+    if (!tty_settings_took_effect(TTY_VERIFY_PARITY, 0))
     {
         option.parity = previous;
         tty_reconfigure();
@@ -855,48 +919,85 @@ parity_t tty_apply_parity(parity_t parity)
  * and the option is reachable over an unauthenticated network socket. The
  * negotiation gate bounds who may ask, not how often.
  *
- * A quarter second is roughly one break's own duration, so a client sending them
- * back to back is slowed to the rate the line can carry rather than refused, and
- * a client using break as it is meant to be used never notices.
+ * The gap is required AFTER the break completes, and is at least as long as that
+ * break actually took. Both halves of that come from a measurement rather than a
+ * guess: on an FT232R here, tcsendbreak(fd, 0) holds the line 0.279 s (0.274-0.280
+ * over five calls, one break received per call, confirmed by reading it back on a
+ * TX-to-RX loopback with PARMRK set).
  *
- * devtool-debt: the interval is a judgement, not a measurement, and it bounds a
- * burst rather than a duty cycle. tcsendbreak(fd, 0) asserts for an
- * implementation-defined 0.25 to 0.5 seconds, and the interval is timed from the
- * START of the previous break, so a client pacing its requests just over the
- * interval gets every one of them and can hold the line in break more or less
- * continuously. What this does stop is the case that was measured - a stream of
- * NULs arriving inside one window, 40 requests reduced to one break.
- * Ceiling: bursts faster than the interval. It does NOT bound the duty cycle.
- * Upgrade trigger: a break receiver on the bench, which would give the platform's
- * real break duration and let the interval be set against it rather than guessed;
- * or a report of a line held in break by a paced client. */
-#define BREAK_MIN_INTERVAL_MS 250
+ * That number is what ruled out the previous shape. The interval used to be a flat
+ * 250 ms measured from the START of the previous break - shorter than the break
+ * itself, so a client pacing requests at the interval re-asserted while the line
+ * was still held and kept it in break continuously. A limit a compliant client can
+ * use to take the console away is the wrong limit.
+ *
+ * Timing the call rather than assuming a constant, because POSIX only promises
+ * "not less than 0.25 and not more than 0.5 seconds" for a zero duration, so a
+ * figure measured on one adapter cannot be hardcoded for every platform. Requiring
+ * a gap equal to the last break's own duration bounds the duty cycle at half
+ * wherever it runs, without knowing anything about the driver in advance.
+ *
+ * The floor still matters on a platform whose break is very short: without it, a
+ * driver asserting for 5 ms would permit a 200-per-second stream that is bounded in
+ * duty cycle and still floods the loop with syscalls.
+ *
+ * Counting and refusing are separate, which is why enforce_gap exists. The limit is
+ * aimed at a remote client, so a break the operator asked for at the keyboard is
+ * never turned down - dropping a deliberate keystroke and saying so only in a debug
+ * line would be a worse outcome than the flood it averts. But it is still recorded,
+ * because the duty cycle it bounds belongs to the line rather than to whoever
+ * asserted it. While the keypress went straight to tcsendbreak and updated neither
+ * static, a client asking for a break during one had its gap measured from whenever
+ * the last REMOTE break ended - long ago or never - and was granted on the spot, so
+ * two full-length breaks landed back to back and the bound was defeated by anyone
+ * who could ask for one break at the moment an operator pressed the key. */
+#define BREAK_MIN_GAP_MS 250
 
-void tty_apply_break(void)
+/* Deliberately takes no descriptor, and acts on device_fd.
+ *
+ * A review suggested giving it one so that forward_to_device's own `fd` parameter would be
+ * honoured all the way down. That is wrong, and the compiler says so: control_apply() also
+ * calls this, and ITS fd is the client socket the request arrived on, not the served device.
+ * A break always belongs to the device, so a parameter here would be a descriptor two
+ * callers would have to remember to disagree about - exactly the mistake this series already
+ * made once, when the stale-socket probe connected on one descriptor and closed another.
+ *
+ * forward_to_device's parameter is the redundant one: both of its call sites pass device_fd.
+ * Left alone rather than removed, because that is upstream's signature and this series has
+ * no reason to touch it. */
+void tty_apply_break(bool enforce_gap)
 {
-    static struct timespec last_break = { 0, 0 };
-    struct timespec now;
-    long elapsed_ms;
+    /* When the last break finished, and how long it held. Both are needed: the gap is
+     * measured from completion, and its size is the previous break's own duration. */
+    static struct timespec break_done = { 0, 0 };
+    static long break_took_ms = 0;
+    struct timespec now, after;
+    bool timed;
+    long idle_ms, required_ms;
 
     if (!tty_serving_device())
     {
         return;
     }
 
-    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
-    {
-        if ((last_break.tv_sec != 0) || (last_break.tv_nsec != 0))
-        {
-            elapsed_ms = ((now.tv_sec - last_break.tv_sec) * 1000L)
-                    + ((now.tv_nsec - last_break.tv_nsec) / 1000000L);
+    /* Read the clock before deciding anything, so `now` is either valid or known not to
+     * be. Folding this into the condition below left it uninitialised on a clock failure
+     * and still used it afterwards to measure the break. */
+    timed = (clock_gettime(CLOCK_MONOTONIC, &now) == 0);
 
-            if (elapsed_ms < BREAK_MIN_INTERVAL_MS)
-            {
-                tio_debug_printf("Ignoring a break requested %ld ms after the last one", elapsed_ms);
-                return;
-            }
+    if (enforce_gap && timed && ((break_done.tv_sec != 0) || (break_done.tv_nsec != 0)))
+    {
+        idle_ms = ((now.tv_sec - break_done.tv_sec) * 1000L)
+                + ((now.tv_nsec - break_done.tv_nsec) / 1000000L);
+
+        required_ms = (break_took_ms > BREAK_MIN_GAP_MS) ? break_took_ms : BREAK_MIN_GAP_MS;
+
+        if (idle_ms < required_ms)
+        {
+            tio_debug_printf("Ignoring a break requested %ld ms after the last one ended, needs %ld",
+                    idle_ms, required_ms);
+            return;
         }
-        last_break = now;
     }
 
     if (tcsendbreak(device_fd, 0) < 0)
@@ -904,6 +1005,17 @@ void tty_apply_break(void)
         /* Reported here rather than at each caller, so a break that could not be
          * sent is not silent on one path and diagnosed on another */
         tio_warning_printf("Could not send break to tty device (%s)", strerror(errno));
+    }
+
+    /* Timed around the call because tcsendbreak blocks for the duration of the break,
+     * so this is the line-hold time on whatever platform this is - not a constant that
+     * has to be right everywhere. Recorded even on failure: a call that failed slowly
+     * still cost the loop that time. */
+    if (timed && (clock_gettime(CLOCK_MONOTONIC, &after) == 0))
+    {
+        break_done = after;
+        break_took_ms = ((after.tv_sec - now.tv_sec) * 1000L)
+                + ((after.tv_nsec - now.tv_nsec) / 1000000L);
     }
 }
 
@@ -1047,10 +1159,23 @@ static void tty_line_toggle_socket(int fd, int mask)
 
     assert_line = ((socket_line_state & mask) == 0);
 
-    if (!telnet_set_line(telnet_client(), fd, control_line, assert_line))
+    switch (telnet_set_line(telnet_client(), fd, control_line, assert_line))
     {
-        device_serial_only("Toggling a serial line");
-        return;
+        case TELNET_REQUEST_UNAVAILABLE:
+            device_serial_only("Toggling a serial line");
+            return;
+
+        case TELNET_REQUEST_FAILED:
+            /* Return before touching the cache. The cache is what the NEXT toggle
+             * derives its direction from, so advancing it here would make the following
+             * toggle ask for the state the peer is already in - turning a request that
+             * failed once into a line that cannot be driven at all. */
+            tio_warning_printf("Could not send the %s request to the peer (%s)",
+                    tty_line_name(mask), strerror(errno));
+            return;
+
+        case TELNET_REQUEST_SENT:
+            break;
     }
 
     if (assert_line)
@@ -1498,13 +1623,25 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
             case KEY_B:
                 if (device_mode == DEVICE_MODE_SOCKET)
                 {
-                    if (!telnet_send_break(telnet_client(), device_fd))
+                    switch (telnet_send_break(telnet_client(), device_fd))
                     {
-                        device_serial_only("Sending break");
+                        case TELNET_REQUEST_UNAVAILABLE:
+                            device_serial_only("Sending break");
+                            break;
+                        case TELNET_REQUEST_FAILED:
+                            tio_warning_printf("Could not send the break request to the peer (%s)",
+                                    strerror(errno));
+                            break;
+                        case TELNET_REQUEST_SENT:
+                            break;
                     }
                     break;
                 }
-                tcsendbreak(device_fd, 0);
+                /* Not refused, but counted: the gap this break earns applies to the
+                 * next client that asks, not to the operator who just pressed the
+                 * key. Sending it here directly is what let a remote request slip in
+                 * during the hold. */
+                tty_apply_break(false);
                 break;
 
             case KEY_C:
@@ -1628,6 +1765,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
 
             case KEY_SHIFT_R:
                 /* Execute shell command */
+                if (device_escaping("Executing a shell command redirected to the device"))
+                {
+                    break;
+                }
                 tio_printf("Execute shell command with I/O redirected to device");
                 tio_printf_raw("Enter command: ");
                 if (tio_readln())
@@ -2953,7 +3094,24 @@ void device_wait(void)
              * process. Pacing every entry after the first would put a second on
              * the front of every reconnect, where a dropped session used to
              * retry at once - and for a socket target, a peer restarting is the
-             * ordinary case rather than an unusual one. */
+             * ordinary case rather than an unusual one.
+             *
+             * A consequence worth writing down, because a review found it by reading and
+             * it is not obvious: a peer that makes CONNECTING succeed and STAYING
+             * CONNECTED fail re-arms this on every pass, so for that peer the sleep below
+             * is never reached at all. Two other things bound the loop instead, and
+             * NEITHER is this pause:
+             *
+             *   interactive     the select() further down waits a second per pass. Measured
+             *                   at ~0.8 reconnects/second against a peer that accepts and
+             *                   drops immediately.
+             *   non-interactive the loop is not entered. A dropped peer fails the next
+             *                   write and the piped-input path reports it and exits.
+             *
+             * So removing the select() timeout, or making the piped path retry rather than
+             * exit, converts this exemption into an unpaced reconnect spin. Both are
+             * load-bearing for a reason that has nothing to do with why they were written.
+             * verify-kickolduser-flap.sh asserts the pacing still holds. */
             if (!probe_immediately)
             {
                 sleep(1);
@@ -3004,7 +3162,11 @@ void device_wait(void)
                     /* Handle commands */
                     handle_command_sequence(input_char, NULL, NULL);
                 }
-                socket_handle_input(&rdfs, NULL);
+                /* Accepting only. There is no device to forward a client's bytes to yet,
+                 * and passing NULL to the full handler put a null pointer into its
+                 * client-read path - unreachable, but only because socket_add_fds leaves
+                 * client descriptors out of the set while disconnected. */
+                socket_accept_pending(&rdfs);
             }
             else if (status == -1)
             {
@@ -3072,6 +3234,7 @@ void device_disconnect(void)
             flock(device_fd, LOCK_UN);
         }
         close(device_fd);
+        device_fd = -1;
         connected = false;
 
         /* Fire alert action */
@@ -3152,10 +3315,23 @@ void forward_to_device(int fd, char output_char)
                     {
                         if (device_mode == DEVICE_MODE_SOCKET)
                         {
-                            if (!telnet_send_break(telnet_client(), fd))
+                            switch (telnet_send_break(telnet_client(), fd))
                             {
-                                device_serial_only("ONULBRK");
-                                return;
+                                case TELNET_REQUEST_UNAVAILABLE:
+                                    device_serial_only("ONULBRK");
+                                    return;
+                                case TELNET_REQUEST_FAILED:
+                                    /* Warns and carries on, where the unavailable case
+                                     * above returns. The only difference either way is
+                                     * whether this NUL is counted as transmitted, since
+                                     * this function handles one character - and it was
+                                     * consumed rather than forwarded, so it is counted.
+                                     * The peer being gone is the read path's to report. */
+                                    tio_warning_printf("Could not send the break request to the peer (%s)",
+                                            strerror(errno));
+                                    break;
+                                case TELNET_REQUEST_SENT:
+                                    break;
                             }
                             status = 0;
                         }
@@ -3168,7 +3344,7 @@ void forward_to_device(int fd, char output_char)
                              * cheaper of the two paths open. A suppressed break
                              * is not an error, and a failed one is reported
                              * inside. */
-                            tty_apply_break();
+                            tty_apply_break(true);
                             status = 0;
                         }
                     }
@@ -3224,6 +3400,32 @@ int device_connect(void)
     bool   do_timestamp = false;
     char*  now = NULL;
     struct timeval tval_before = {}, tval_now, tval_result;
+
+    /* Refuse before connecting rather than after. A client engages the protocol the
+     * moment it resets, and telnet_filter_input() ignores a context that is not
+     * enabled, so on the client side engaged is exactly option.rfc2217: the answer is
+     * settled before the socket exists, and nothing the peer does can change it.
+     *
+     * Refusing after net_connect() meant opening the port only to say no, and a
+     * ser2net accepter that serves one session at a time hands the line over on
+     * connect - so the refusal took the device from whoever was already using it.
+     *
+     * The other two conjuncts are load-bearing, not defensive. device_mode is
+     * resolved by tty_search() and only under --auto-connect direct, so it cannot be
+     * read off option.target here. interactive_mode is tested because --exec is
+     * already ignored in non-interactive mode further down, for every target; leaving
+     * it out would turn that silent success into a failure, which is a different
+     * change from this one and not one a review asked for.
+     *
+     * The interactive escape key keeps device_escaping(). It asks the same question of
+     * a running session, where engagement really can change underneath it, so the two
+     * are not one test written twice. */
+    if ((option.exec != NULL) && interactive_mode && option.rfc2217
+            && (device_mode == DEVICE_MODE_SOCKET))
+    {
+        tio_error_printf("--exec writes straight to the connection, which would put unescaped bytes on an RFC 2217 session");
+        exit(EXIT_FAILURE);
+    }
 
     if (device_mode == DEVICE_MODE_SOCKET)
     {
@@ -3444,6 +3646,8 @@ int device_connect(void)
 
     if (option.exec != NULL)
     {
+        /* Already refused at the top of this function where it applies, before any
+         * connection was made */
         status = execute_shell_command(device_fd, option.exec);
         exit(status);
     }
@@ -3507,6 +3711,23 @@ int device_connect(void)
                      * protocol leaves zero bytes and the loop below runs not
                      * at all, which is what should happen. */
                     bytes_read = telnet_filter_input(telnet_client(), device_fd, input_buffer, bytes_read);
+
+                    /* An answer that could not be delivered means this peer is gone, so
+                     * treat it exactly as a failed read: the session reconnects.
+                     *
+                     * Checked here rather than left to the next read to report, even
+                     * though today it always would. net_send_raw can fail on this socket
+                     * for a stalled peer as well as a real error, since net_connect() now
+                     * bounds the client's send the same way the server bounds its own - but
+                     * that is a property of net_connect() in another file, and relying on
+                     * it silently is how the read and write sides drift apart. Acting on
+                     * the failure where it is visible also stops the rest of this
+                     * iteration running against a socket that has already died. */
+                    if (telnet_write_failed(telnet_client()))
+                    {
+                        tio_error_printf_silent("Could not answer the socket peer");
+                        goto error_read;
+                    }
                 }
 
                 /* Update receive statistics */

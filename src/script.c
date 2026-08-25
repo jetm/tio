@@ -305,14 +305,40 @@ static int api_write(lua_State *L)
  * answered, escaping on the write side never engages either.
  *
  * A read that was entirely protocol waits again rather than reporting a
- * timeout that did not happen. The wait restarts, so a peer that keeps sending
- * protocol can stretch the caller's timeout; negotiation is a burst at the
- * start of a connection, so in practice that is a round or two. */
+  * timeout that did not happen, but it waits for what is LEFT of the caller's
+  * timeout rather than for the whole of it again. Restarting the clock made the
+  * timeout an upper bound on nothing: a peer sending protocol every 200 ms held a
+  * one-second read open for as long as it kept talking, measured at 6.2 s. That
+  * was excused as a burst at the start of a connection, which is true of
+  * negotiation and not true in general - and a script's timeout is what a script
+  * uses to decide a device is not answering, so stretching it disables exactly
+  * the caller's own error handling.
+  *
+  * One deadline for the whole call, monotonic so that a clock adjustment mid-read
+  * cannot move it. A negative timeout means wait forever and has no deadline to
+  * compute. */
 static ssize_t script_read_poll(void *data, size_t len, int timeout)
 {
+    struct timespec start;
+    int remaining = timeout;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    /* Already known undeliverable, from a previous call. The check below catches a failure
+     * as it happens, and cannot catch one that happened earlier: a script that wraps its
+     * read in pcall and asks again would spend a fresh timeout per attempt reading protocol
+     * it has no way to answer, which is the cost the branch below exists to avoid. The flag
+     * is a latch and the session does not recover, so the honest answer is the same one and
+     * it can be given now. */
+    if ((device_mode == DEVICE_MODE_SOCKET) && telnet_write_failed(telnet_client()))
+    {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+
     while (true)
     {
-        ssize_t ret = read_poll(device_fd, data, len, timeout);
+        ssize_t ret = read_poll(device_fd, data, len, remaining);
 
         if ((ret <= 0) || (device_mode != DEVICE_MODE_SOCKET))
         {
@@ -321,9 +347,48 @@ static ssize_t script_read_poll(void *data, size_t len, int timeout)
 
         ret = (ssize_t) telnet_filter_input(telnet_client(), device_fd, data,
                                             (size_t) ret);
+
+        /* A peer that cannot take its own answers is not one to keep waiting on. Reported
+         * as a read failure because that is what the caller already knows how to handle,
+         * and because continuing would spend the whole remaining timeout re-answering a
+         * socket that is gone. */
+        if (telnet_write_failed(telnet_client()))
+        {
+            /* Both callers report strerror(errno), and what errno holds here is whatever
+             * the failing send left - now usually EAGAIN, since bounding the client's send
+             * timeout made the retry budget the ordinary way this is reached. "Resource
+             * temporarily unavailable" is the wrong thing to tell a script: it reads as
+             * transient and worth retrying, when net_send_raw returns it only after the
+             * timeout expired SEND_MAX_STALLED times and the verdict is that the peer has
+             * stopped taking bytes. ETIMEDOUT says that, and says it whatever the last
+             * syscall happened to set - which matters on a retry after the latch, where no
+             * send is attempted at all and errno could describe something unrelated. */
+            errno = ETIMEDOUT;
+            return -1;
+        }
+
         if (ret > 0)
         {
             return ret;
+        }
+
+        if (timeout >= 0)
+        {
+            struct timespec now;
+            long elapsed;
+
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            elapsed = ((now.tv_sec - start.tv_sec) * 1000)
+                    + ((now.tv_nsec - start.tv_nsec) / 1000000);
+
+            if (elapsed >= timeout)
+            {
+                /* Report the timeout the caller asked for. read_poll says 0 for a
+                 * timeout, which is what this returns rather than an error: nothing
+                 * went wrong, the data just did not come. */
+                return 0;
+            }
+            remaining = timeout - (int) elapsed;
         }
     }
 }
