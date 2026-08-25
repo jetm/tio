@@ -404,7 +404,10 @@ and variables available:
 Waits for the Lua pattern to match or timeout before continuing.
 Timeout is in milliseconds, defaults to 0 meaning it will wait forever.
 
-Returns the captures from the pattern or `nil` on timeout.
+Returns the captures from the pattern, followed by everything read up to and
+including the match, or `nil` and everything read so far on timeout. The
+accumulated text is always the last value returned, so a pattern with no captures
+or one capture yields the match and then the text.
 
 #### `tio.read(size, timeout)`
 

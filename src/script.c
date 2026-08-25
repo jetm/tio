@@ -46,6 +46,9 @@
 static int device_fd;
 
 static char script_init[] =
+/* table.unpack is 5.2+; 5.1 spells it as a global. src/meson.build accepts any
+   lua >= 5.1, so bind whichever exists once rather than per call. */
+"local _tio_unpack = table.unpack or unpack\n"
 "tio.set = function(arg)\n"
 "    local dtr = arg.DTR or -1\n"
 "    local rts = arg.RTS or -1\n"
@@ -62,7 +65,9 @@ static char script_init[] =
 "        if c then\n"
 "            str = str .. c\n"
 "            if string.match(str, pattern) then\n"
-"                return string.match(str, pattern)\n"
+"                local caps = {string.match(str, pattern)}\n"
+"                caps[#caps + 1] = str\n"
+"                return _tio_unpack(caps)\n"
 "            end\n"
 "        else\n"
 "            return nil, str\n"
