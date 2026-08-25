@@ -76,6 +76,7 @@
 #include "xymodem.h"
 #include "fs.h"
 #include "readline.h"
+#include "net.h"
 
 /* tty device listing configuration */
 
@@ -167,6 +168,7 @@ bool interactive_mode = true;
 char key_hit = 0xff;
 
 const char* device_name = NULL;
+device_mode_t device_mode = DEVICE_MODE_TTY;
 GList *device_list = NULL;
 static struct termios tio, tio_old, stdout_new, stdout_old, stdin_new, stdin_old;
 static unsigned long rx_total = 0, tx_total = 0;
@@ -184,6 +186,13 @@ static int pipefd[2];
 static pthread_mutex_t mutex_input_ready = PTHREAD_MUTEX_INITIALIZER;
 static char line[PATH_MAX];
 static size_t listing_device_name_length_max = 0;
+
+/* Whether the wait loop may probe without pausing first. True at startup and
+ * again after every successful connect, so a session that ran and then lost its
+ * peer retries at once; false while attempts keep failing, which is what paces a
+ * loop that would otherwise spin. It lives out here rather than inside the loop
+ * because only a successful connect knows when to clear it. */
+static bool probe_immediately = true;
 
 static void optional_local_echo(char c)
 {
@@ -237,7 +246,7 @@ inline static unsigned char char_to_nibble(char c)
 #define FLUSH_POLL_MS       100
 #define FLUSH_MAX_STALLED   100
 
-void tty_sync(int fd)
+void device_sync(int fd)
 {
     char *read_ptr = tty_buffer;
     size_t remaining = tty_buffer_count;
@@ -246,16 +255,25 @@ void tty_sync(int fd)
 
     while (remaining > 0)
     {
-        count = write(fd, read_ptr, remaining);
+        if (device_mode == DEVICE_MODE_SOCKET)
+        {
+            count = net_send(fd, read_ptr, remaining);
+        }
+        else
+        {
+            count = write(fd, read_ptr, remaining);
+        }
         if (count < 0)
         {
             if (((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == EINTR))
                     && (--attempts > 0))
             {
-                /* The device is opened non-blocking and the flag is never
-                 * cleared, so no room left in the transmit buffer is an
-                 * ordinary outcome rather than a failure. Wait for the line to
-                 * take more and resume where this stopped. */
+                /* A tty is opened non-blocking, so no room left in its transmit
+                 * buffer is an ordinary outcome rather than a failure. Wait for
+                 * the far end to take more and resume from where this stopped:
+                 * returning here would drop the rest of a buffer the caller has
+                 * already been told was written. The socket is blocking, so this
+                 * branch belongs to the tty. */
                 struct pollfd fds = { .fd = fd, .events = POLLOUT, .revents = 0 };
                 poll(&fds, 1, FLUSH_POLL_MS);
                 continue;
@@ -275,8 +293,11 @@ void tty_sync(int fd)
         read_ptr += count;
         remaining -= (size_t) count;
         attempts = FLUSH_MAX_STALLED;
-        fsync(fd);
-        tcdrain(fd);
+        if (device_mode == DEVICE_MODE_TTY)
+        {
+            fsync(fd);
+            tcdrain(fd);
+        }
     }
 
     // Reset
@@ -284,7 +305,7 @@ void tty_sync(int fd)
     tty_buffer_count = 0;
 }
 
-ssize_t tty_write(int fd, const void *buffer, size_t count)
+ssize_t device_write(int fd, const void *buffer, size_t count)
 {
     ssize_t retval = 0, bytes_written = 0;
     size_t i;
@@ -303,11 +324,19 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Write byte by byte with output delay
         for (i=0; i<count; i++)
         {
-            retval = write(fd, (const char *)buffer + i, 1);
+            if (device_mode == DEVICE_MODE_SOCKET)
+            {
+                retval = net_send(fd, (const char *)buffer + i, 1);
+            }
+            else
+            {
+                retval = write(fd, (const char *)buffer + i, 1);
+            }
             if (retval < 0)
             {
                 // Error
                 tio_debug_printf("Write error (%s)", strerror(errno));
+
                 /* Report the error when nothing went out. Returning the count so
                  * far is right once some of it did - the caller can see the
                  * shortfall - but returning zero for a write that failed
@@ -327,8 +356,11 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
                 delay(option.output_line_delay);
             }
 
-            fsync(fd);
-            tcdrain(fd);
+            if (device_mode == DEVICE_MODE_TTY)
+            {
+                fsync(fd);
+                tcdrain(fd);
+            }
 
             if (option.output_delay)
             {
@@ -341,7 +373,7 @@ ssize_t tty_write(int fd, const void *buffer, size_t count)
         // Force write of tty buffer if too full
         if ((tty_buffer_count + count) > BUFSIZ)
         {
-            tty_sync(fd);
+            device_sync(fd);
         }
 
         // Copy bytes to tty write buffer
@@ -424,6 +456,10 @@ void *tty_stdin_input_thread(void *arg)
                             exit(EXIT_SUCCESS);
                             break;
                         case KEY_SHIFT_F:
+                            if (device_serial_only("Flushing data I/O buffers"))
+                            {
+                                break;
+                            }
                             tio_printf("Flushed data I/O buffers")
                             tcflush(device_fd, TCIOFLUSH);
                             break;
@@ -489,7 +525,7 @@ static void handle_hex_prompt(char c)
         unsigned char hex_value = char_to_nibble(hex_chars[0]) << 4 | (char_to_nibble(hex_chars[1]) & 0x0F);
         hex_char_index = 0;
 
-        ssize_t status = tty_write(device_fd, &hex_value, 1);
+        ssize_t status = device_write(device_fd, &hex_value, 1);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -499,6 +535,20 @@ static void handle_hex_prompt(char c)
             tx_total++;
         }
     }
+}
+
+bool device_serial_only(const char *operation)
+{
+    if (device_mode == DEVICE_MODE_TTY)
+    {
+        return false;
+    }
+
+    /* Say so rather than doing nothing: a user pressing a familiar key is
+     * better served by an explanation than by silence */
+    tio_warning_printf("%s is not available in socket mode", operation);
+
+    return true;
 }
 
 static const char *tty_line_name(int mask)
@@ -923,6 +973,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_SHIFT_L:
+                if (device_serial_only("Showing line states"))
+                {
+                    break;
+                }
                 if (ioctl(device_fd, TIOCMGET, &state) < 0)
                 {
                     tio_warning_printf("Could not get line state (%s)", strerror(errno));
@@ -957,6 +1011,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_G:
+                if (device_serial_only("Toggling a serial line"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which serial line number to toggle:");
                 tio_printf("(0) DTR");
                 tio_printf("(1) RTS");
@@ -970,6 +1028,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_P:
+                if (device_serial_only("Pulsing a serial line"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which serial line number to pulse:");
                 tio_printf("(0) DTR");
                 tio_printf("(1) RTS");
@@ -983,6 +1045,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_B:
+                if (device_serial_only("Sending break"))
+                {
+                    break;
+                }
                 tcsendbreak(device_fd, 0);
                 break;
 
@@ -1156,6 +1222,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_X:
+                if (device_serial_only("Xmodem transfer"))
+                {
+                    break;
+                }
                 tio_printf("Please enter which X modem protocol to use:");
                 tio_printf(" (0) XMODEM-1K send");
                 tio_printf(" (1) XMODEM-CRC send");
@@ -1165,6 +1235,10 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_Y:
+                if (device_serial_only("Ymodem transfer"))
+                {
+                    break;
+                }
                 tio_printf("Send file with YMODEM");
                 tio_printf_raw("Enter file name: ");
                 if (tio_readln()) {
@@ -1474,7 +1548,7 @@ void tty_reconfigure(void)
 {
     tty_configure();
 
-    if (connected)
+    if (connected && (device_mode == DEVICE_MODE_TTY))
     {
         /* Activate new port settings */
         tcsetattr(device_fd, TCSANOW, &tio);
@@ -2337,6 +2411,23 @@ void tty_search(void)
                 device_name = option.target;
             }
 
+            if (net_target_is_socket(device_name))
+            {
+                // Socket target detected -> do not treat target as a tty device
+                device_mode = DEVICE_MODE_SOCKET;
+
+                if (net_address_get() == NULL)
+                {
+                    // Parse and resolve up front so a malformed target is
+                    // reported here. tty_search() also runs on every retry, so
+                    // resolving only once keeps the resolver off the reconnect
+                    // path where it would block.
+                    net_resolve(device_name);
+                }
+
+                return;
+            }
+
             if (strlen(device_name) == TOPOLOGY_ID_SIZE)
             {
                 // Potential topology ID detected -> trigger device search
@@ -2365,7 +2456,7 @@ void tty_search(void)
     }
 }
 
-void tty_wait_for_device(void)
+void device_wait(void)
 {
     fd_set rdfs;
     int    status;
@@ -2378,6 +2469,30 @@ void tty_wait_for_device(void)
     /* Loop until device pops up */
     while (true)
     {
+        if (!interactive_mode)
+        {
+            /* One pacing point for every way out of this loop, because none of
+             * the tests below proves a peer or device is actually there: a host
+             * and port have no file to test, a unix socket file outlives the
+             * server that created it, and a tty node can exist while still
+             * refusing to open. Each of those returns to a connect attempt that
+             * can fail at once, and an unpaced one of those is a spin. The
+             * stale-socket case was exactly that - access(F_OK) succeeded on a
+             * file whose server had died without unlinking it. Interactive mode
+             * is paced by the select() timeout below instead.
+             *
+             * The exemption is per attempt-that-followed-a-success, not per
+             * process. Pacing every entry after the first would put a second on
+             * the front of every reconnect, where a dropped session used to
+             * retry at once - and for a socket target, a peer restarting is the
+             * ordinary case rather than an unusual one. */
+            if (!probe_immediately)
+            {
+                sleep(1);
+            }
+            probe_immediately = false;
+        }
+
         tty_search();
 
         if (interactive_mode)
@@ -2434,7 +2549,7 @@ void tty_wait_for_device(void)
 #elif defined(__APPLE__)
                 if (errno == EBADF)
                 {
-                    break; // tty_disconnect() will be naturally triggered by atexit()
+                    break; // device_disconnect() will be naturally triggered by atexit()
                 }
 #else
                 tio_error_printf("select() failed (%s)", strerror(errno));
@@ -2443,8 +2558,28 @@ void tty_wait_for_device(void)
             }
         }
 
+        /* The device file to test for, and the access mode that says it is
+         * usable. A unix endpoint only has to exist; a tty has to be readable */
+        const char *probe_path = device_name;
+        int probe_mode = R_OK;
+
+        if (device_mode == DEVICE_MODE_SOCKET)
+        {
+            probe_path = net_socket_path();
+            probe_mode = F_OK;
+
+            if (probe_path == NULL)
+            {
+                /* A host and port have no file to test, so the connection
+                 * attempt itself is the availability test. Probing the
+                 * filesystem here would never pass and would wait forever. */
+                last_errno = 0;
+                return;
+            }
+        }
+
         /* Test for accessible device file */
-        status = access(device_name, R_OK);
+        status = access(probe_path, probe_mode);
         if (status == 0)
         {
             last_errno = 0;
@@ -2452,27 +2587,22 @@ void tty_wait_for_device(void)
         }
         else if (last_errno != errno)
         {
-            tio_warning_printf("Could not open %s (%s)", device_name, strerror(errno));
-            tio_printf("Waiting for tty device..");
+            tio_warning_printf("Could not open %s (%s)", probe_path, strerror(errno));
+            tio_printf("Waiting for device..");
             last_errno = errno;
-        }
-
-        if (!interactive_mode)
-        {
-            /* In non-interactive mode we do not need to handle input key
-             * commands so we simply sleep 1 second between checking for
-             * presence of tty device */
-            sleep(1);
         }
     }
 }
 
-void tty_disconnect(void)
+void device_disconnect(void)
 {
     if (connected)
     {
         tio_printf("Disconnected");
-        flock(device_fd, LOCK_UN);
+        if (device_mode == DEVICE_MODE_TTY)
+        {
+            flock(device_fd, LOCK_UN);
+        }
         close(device_fd);
         connected = false;
 
@@ -2483,21 +2613,24 @@ void tty_disconnect(void)
 
 void tty_restore(void)
 {
-    tcsetattr(device_fd, TCSANOW, &tio_old);
-
-    if (option.rs485)
+    if (device_mode == DEVICE_MODE_TTY)
     {
-        /* Restore original RS-485 mode */
-        rs485_mode_restore(device_fd);
+        tcsetattr(device_fd, TCSANOW, &tio_old);
+
+        if (option.rs485)
+        {
+            /* Restore original RS-485 mode */
+            rs485_mode_restore(device_fd);
+        }
     }
 
     if (connected)
     {
-        tty_disconnect();
+        device_disconnect();
     }
 }
 
-void forward_to_tty(int fd, char output_char)
+void forward_to_device(int fd, char output_char)
 {
     int status;
 
@@ -2522,7 +2655,7 @@ void forward_to_tty(int fd, char output_char)
 
         optional_local_echo(crlf[0]);
         optional_local_echo(crlf[1]);
-        status = tty_write(fd, crlf, 2);
+        status = device_write(fd, crlf, 2);
         if (status < 0)
         {
             tio_warning_printf("Could not write to tty device");
@@ -2549,11 +2682,15 @@ void forward_to_tty(int fd, char output_char)
 
                     if ((output_char == 0) && (option.map_o_nulbrk))
                     {
+                        if (device_serial_only("ONULBRK"))
+                        {
+                            return;
+                        }
                         status = tcsendbreak(fd, 0);
                     }
                     else
                     {
-                        status = tty_write(fd, &output_char, 1);
+                        status = device_write(fd, &output_char, 1);
                     }
 
                     if (status < 0)
@@ -2573,7 +2710,7 @@ void forward_to_tty(int fd, char output_char)
                 }
                 else if (option.input_mode == INPUT_MODE_NORMAL)
                 {
-                    status = tty_write(device_fd, &output_char, 1);
+                    status = device_write(device_fd, &output_char, 1);
                     if (status < 0)
                     {
                         tio_warning_printf("Could not write to tty device");
@@ -2592,7 +2729,7 @@ void forward_to_tty(int fd, char output_char)
     }
 }
 
-int tty_connect(void)
+int device_connect(void)
 {
     fd_set rdfs;           /* Read file descriptor set */
     int    maxfd;          /* Maximum file descriptor used */
@@ -2604,31 +2741,43 @@ int tty_connect(void)
     char*  now = NULL;
     struct timeval tval_before = {}, tval_now, tval_result;
 
-    /* Open tty device */
-    device_fd = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (device_fd < 0)
+    if (device_mode == DEVICE_MODE_SOCKET)
     {
-        tio_error_printf_silent("Could not open tty device (%s)", strerror(errno));
-        goto error_open;
+        /* Connect to socket endpoint */
+        device_fd = net_connect();
+        if (device_fd < 0)
+        {
+            goto error_open;
+        }
     }
-
-    /* Make sure device is of tty type */
-    if (!isatty(device_fd))
+    else
     {
-        tio_error_printf("Not a tty device");
-        exit(EXIT_FAILURE);;
-    }
+        /* Open tty device */
+        device_fd = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        if (device_fd < 0)
+        {
+            tio_error_printf_silent("Could not open tty device (%s)", strerror(errno));
+            goto error_open;
+        }
 
-    /* Lock device file */
-    status = flock(device_fd, LOCK_EX | LOCK_NB);
-    if ((status == -1) && (errno == EWOULDBLOCK))
-    {
-        tio_error_printf("Device file is locked by another process");
-        exit(EXIT_FAILURE);
-    }
+        /* Make sure device is of tty type */
+        if (!isatty(device_fd))
+        {
+            tio_error_printf("Not a tty device");
+            exit(EXIT_FAILURE);;
+        }
 
-    /* Flush stale I/O data (if any) */
-    tcflush(device_fd, TCIOFLUSH);
+        /* Lock device file */
+        status = flock(device_fd, LOCK_EX | LOCK_NB);
+        if ((status == -1) && (errno == EWOULDBLOCK))
+        {
+            tio_error_printf("Device file is locked by another process");
+            exit(EXIT_FAILURE);
+        }
+
+        /* Flush stale I/O data (if any) */
+        tcflush(device_fd, TCIOFLUSH);
+    }
 
     /* Print connect status */
     tio_printf("Connected to %s", device_name);
@@ -2646,26 +2795,29 @@ int tty_connect(void)
     /* Manage print output mode */
     tty_output_mode_set(option.output_mode);
 
-    /* Save current port settings */
-    if (tcgetattr(device_fd, &tio_old) < 0)
+    if (device_mode == DEVICE_MODE_TTY)
     {
-        tio_error_printf_silent("Could not get port settings (%s)", strerror(errno));
-        goto error_tcgetattr;
-    }
+        /* Save current port settings */
+        if (tcgetattr(device_fd, &tio_old) < 0)
+        {
+            tio_error_printf_silent("Could not get port settings (%s)", strerror(errno));
+            goto error_tcgetattr;
+        }
 
 #ifdef HAVE_IOSSIOSPEED
-    if (!standard_baudrate)
-    {
-        /* OS X wants these fields left alone before setting arbitrary baud rate */
-        tio.c_ispeed = tio_old.c_ispeed;
-        tio.c_ospeed = tio_old.c_ospeed;
-    }
+        if (!standard_baudrate)
+        {
+            /* OS X wants these fields left alone before setting arbitrary baud rate */
+            tio.c_ispeed = tio_old.c_ispeed;
+            tio.c_ospeed = tio_old.c_ospeed;
+        }
 #endif
 
-    /* Manage RS-485 mode */
-    if (option.rs485)
-    {
-        rs485_mode_enable(device_fd);
+        /* Manage RS-485 mode */
+        if (option.rs485)
+        {
+            rs485_mode_enable(device_fd);
+        }
     }
 
     /* Make sure we restore tty settings on exit */
@@ -2675,23 +2827,41 @@ int tty_connect(void)
         first = false;
     }
 
-    /* Activate new port settings */
-    status = tcsetattr(device_fd, TCSANOW, &tio);
-    if (status == -1)
+    if (device_mode == DEVICE_MODE_TTY)
     {
-        tio_error_printf_silent("Could not apply port settings (%s)", strerror(errno));
-        goto error_tcsetattr;
-    }
-
-    /* Set arbitrary baudrate (only works on supported platforms) */
-    if (!standard_baudrate)
-    {
-        if (setspeed(device_fd, option.baudrate) != 0)
+        /* Activate new port settings */
+        status = tcsetattr(device_fd, TCSANOW, &tio);
+        if (status == -1)
         {
-            tio_error_printf_silent("Could not set baudrate speed (%s)", strerror(errno));
-            goto error_setspeed;
+            tio_error_printf_silent("Could not apply port settings (%s)", strerror(errno));
+            goto error_tcsetattr;
+        }
+
+        /* Set arbitrary baudrate (only works on supported platforms) */
+        if (!standard_baudrate)
+        {
+            if (setspeed(device_fd, option.baudrate) != 0)
+            {
+                tio_error_printf_silent("Could not set baudrate speed (%s)", strerror(errno));
+                goto error_setspeed;
+            }
         }
     }
+
+    /* The port is open and configured, so the next wait may probe without pausing.
+     *
+     * This has to sit after the last setup step that can fail, not next to the
+     * "Connected to" that announces the open. Opening is not the success the
+     * exemption is about: tcgetattr, tcsetattr and setspeed each jump to an error
+     * label that returns TIO_ERROR to the connect loop, and a device that opens but
+     * cannot be configured fails there on every pass. Arming the exemption before
+     * them re-arms it on every pass too, so the pause is never taken - not once,
+     * unlike a spin that at least settles.
+     *
+     * A recurring configure failure is not exotic: a device unplugged between open()
+     * and tcsetattr() lands here, and the reconnect path is where a device is being
+     * unplugged by definition. */
+    probe_immediately = true;
 
     /* If stdin is a pipe forward all input to tty device */
     if (interactive_mode == false)
@@ -2790,8 +2960,9 @@ int tty_connect(void)
                 ssize_t bytes_read = read(device_fd, input_buffer, BUFSIZ);
                 if (bytes_read <= 0)
                 {
-                    /* Error reading - device is likely unplugged */
-                    tio_error_printf_silent("Could not read from tty device");
+                    /* Error reading - a tty is likely unplugged, a socket peer
+                     * has likely closed. Either way the session reconnects. */
+                    tio_error_printf_silent("Could not read from device");
                     goto error_read;
                 }
 
@@ -2828,6 +2999,17 @@ int tty_connect(void)
                     static unsigned long count = 0;
 
                     input_char = input_buffer[i];
+
+                    /* A socket carries no termios input flags, so the INLCR,
+                     * IGNCR and ICRNL mappings the kernel applies to a tty
+                     * device are applied here instead */
+                    if (device_mode == DEVICE_MODE_SOCKET)
+                    {
+                        if (!socket_map_input_char(&input_char))
+                        {
+                            continue;
+                        }
+                    }
 
                     /* Handle timestamps */
                     switch (option.output_mode)
@@ -2978,7 +3160,7 @@ int tty_connect(void)
                 else if (bytes_read == 0)
                 {
                     /* Reached EOF (when piping to stdin, never reached) */
-                    tty_sync(device_fd);
+                    device_sync(device_fd);
                     exit(EXIT_SUCCESS);
                 }
 
@@ -3022,7 +3204,7 @@ int tty_connect(void)
 
                                         // Write current line to tty device
                                         char *rl_line = readline_get();
-                                        tty_write(device_fd, rl_line, strlen(rl_line));
+                                        device_write(device_fd, rl_line, strlen(rl_line));
                                     }
                                     else
                                     {
@@ -3039,11 +3221,11 @@ int tty_connect(void)
 
                     if (forward)
                     {
-                        forward_to_tty(device_fd, output_char);
+                        forward_to_device(device_fd, output_char);
                     }
                 }
 
-                tty_sync(device_fd);
+                device_sync(device_fd);
             }
             /* Unconditional, because socket_handle_input tests its own descriptors and
              * returns at once when the socket option is off or nothing is ready. A
@@ -3058,10 +3240,10 @@ int tty_connect(void)
 
                 if (forward)
                 {
-                    forward_to_tty(device_fd, output_char);
+                    forward_to_device(device_fd, output_char);
                 }
 
-                tty_sync(device_fd);
+                device_sync(device_fd);
             }
         }
         else if (status == -1)
@@ -3075,7 +3257,7 @@ int tty_connect(void)
 #elif defined(__APPLE__)
             if (errno == EBADF)
             {
-                break; // tty_disconnect() will be naturally triggered by atexit()
+                break; // device_disconnect() will be naturally triggered by atexit()
             }
 #else
             tio_error_printf("select() failed (%s)", strerror(errno));
@@ -3095,7 +3277,7 @@ error_setspeed:
 error_tcsetattr:
 error_tcgetattr:
 error_read:
-    tty_disconnect();
+    device_disconnect();
 error_open:
     return TIO_ERROR;
 }

@@ -132,15 +132,15 @@ int main(int argc, char *argv[])
     if (option.no_reconnect)
     {
         tty_search();
-        status = tty_connect();
+        status = device_connect();
     }
     else
     {
         /* Enter connect loop */
         while (true)
         {
-            tty_wait_for_device();
-            tty_connect();
+            device_wait();
+            device_connect();
         }
     }
 

@@ -130,9 +130,9 @@ void option_print_help(char *argv[])
 {
     UNUSED(argv);
 
-    printf("Usage: tio [<options>] <tty-device|profile|tid>\n");
+    printf("Usage: tio [<options>] <tty-device|socket|profile|tid>\n");
     printf("\n");
-    printf("Connect to TTY device directly or via configuration profile or topology ID.\n");
+    printf("Connect to TTY device directly or via socket, configuration profile, or topology ID.\n");
     printf("\n");
     printf("Options:\n");
     printf("  -b, --baudrate <bps>                   Baud rate (default: 115200)\n");

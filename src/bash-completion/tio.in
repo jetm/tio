@@ -133,12 +133,15 @@ _tio()
 
     profiles="`tio --complete-profiles`"
 
+    #  A socket target has no filesystem listing to offer beyond the prefix
+    schemes="unix: inet: inet6:"
+
     if [ -d /dev/serial/by-id ]; then
         ttys=$(printf '%s\n' /dev/tty* /dev/serial/by-id/*)
     else
         ttys=$(printf '%s\n' /dev/tty*)
     fi
-    COMPREPLY=( $(compgen -W "${ttys} ${profiles}" -- ${cur}) )
+    COMPREPLY=( $(compgen -W "${ttys} ${profiles} ${schemes}" -- ${cur}) )
     return 0
 }
 
