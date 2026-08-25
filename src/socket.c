@@ -33,6 +33,7 @@
 #include "socket.h"
 #include "options.h"
 #include "print.h"
+#include "telnet.h"
 #include "tty.h"
 
 #define MAX_SOCKET_CLIENTS 16
@@ -40,6 +41,11 @@
 
 static int sockfd;
 static int clientfds[MAX_SOCKET_CLIENTS];
+
+/* One negotiation state per client, because they do not agree: one may speak
+ * Telnet while the next is a plain nc, and a single shared state would let the
+ * first decide what the second receives */
+static telnet_t clienttelnet[MAX_SOCKET_CLIENTS];
 static int socket_family = AF_UNSPEC;
 static int port_number = SOCKET_PORT_DEFAULT;
 
@@ -278,11 +284,23 @@ void socket_write(char input_char)
     {
         if (clientfds[i] != -1)
         {
+            /* Only a client that negotiated is written to as a Telnet peer.
+             * The rest receive the device's bytes and nothing else, which is
+             * what every existing consumer of this socket expects. */
+            char buffer[2];
+            size_t length = 1;
+
+            buffer[0] = input_char;
+            if (telnet_engaged(&clienttelnet[i]) && (input_char == (char) 0xff))
+            {
+                buffer[1] = input_char;
+                length = 2;
+            }
 
 #if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-            if (send(clientfds[i], &input_char, 1, 0) <= 0)
+            if (send(clientfds[i], buffer, length, 0) <= 0)
 #else
-            if (send(clientfds[i], &input_char, 1, MSG_NOSIGNAL) <= 0)
+            if (send(clientfds[i], buffer, length, MSG_NOSIGNAL) <= 0)
 #endif
             {
                 tio_error_printf_silent("Failed to write to socket (%s)", strerror(errno));
@@ -381,6 +399,15 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
             if (clientfds[i] == -1)
             {
                 clientfds[i] = clientfd;
+                telnet_reset(&clienttelnet[i], TELNET_ROLE_SERVER);
+
+                if (option.socket_rfc2217)
+                {
+                    /* Speak first, since a client has no way to know the
+                     * option is on offer otherwise. Without the flag nothing
+                     * is sent and the socket stays the raw pipe it was. */
+                    telnet_server_offer(&clienttelnet[i], clientfd);
+                }
                 break;
             }
         }
@@ -402,6 +429,17 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
                 close(clientfds[i]);
                 clientfds[i] = -1;
                 continue;
+            }
+
+            /* Only a socket that was told to speak Telnet parses it. Without
+             * the option this is the byte pipe it has always been, in both
+             * directions, and a client cannot reach the serial port's
+             * configuration by sending bytes that happen to look like
+             * protocol. */
+            if (option.socket_rfc2217 &&
+                (telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1) == 0))
+            {
+                return false;
             }
 
             if (!socket_map_input_char(output_char))

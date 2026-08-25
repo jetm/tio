@@ -32,6 +32,7 @@
 #include "error.h"
 #include "net.h"
 #include "print.h"
+#include "telnet.h"
 
 #define NET_PORT_DEFAULT 3333
 #define NET_PORT_MAX 65535
@@ -316,11 +317,21 @@ int net_connect(void)
     return fd;
 }
 
-ssize_t net_send(int fd, const void *buffer, size_t count)
+ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 {
 #if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
     return send(fd, buffer, count, 0);
 #else
     return send(fd, buffer, count, MSG_NOSIGNAL);
 #endif
+}
+
+ssize_t net_send(int fd, const void *buffer, size_t count)
+{
+    if (telnet_engaged(telnet_client()))
+    {
+        return telnet_send(fd, buffer, count);
+    }
+
+    return net_send_raw(fd, buffer, count);
 }

@@ -77,6 +77,7 @@
 #include "fs.h"
 #include "readline.h"
 #include "net.h"
+#include "telnet.h"
 
 /* tty device listing configuration */
 
@@ -622,9 +623,287 @@ void tty_line_set(int fd, tty_line_config_t line_config[])
     }
 }
 
+/* Put the current settings on the served device and say whether it took them.
+ * The test is what the device reports back against what was asked of it, not
+ * merely that something changed: a rate the device cannot manage still moves
+ * the control flags, to B0, which would otherwise read as success while the
+ * line was in fact hung up. */
+static bool tty_settings_took_effect(void)
+{
+    struct termios check;
+
+    tty_configure();
+
+    if (tcsetattr(device_fd, TCSANOW, &tio) < 0)
+    {
+        return false;
+    }
+
+    if (!standard_baudrate)
+    {
+        /* An arbitrary rate does not travel through termios, so the platform
+         * helper is the only thing that can say whether it landed */
+        if (setspeed(device_fd, option.baudrate) != 0)
+        {
+            return false;
+        }
+    }
+
+    if (tcgetattr(device_fd, &check) < 0)
+    {
+        return false;
+    }
+
+    if (standard_baudrate && (cfgetospeed(&check) != cfgetospeed(&tio)))
+    {
+        return false;
+    }
+
+    /* CMSPAR belongs in the mask because it is the only thing separating mark
+     * from odd and space from even. It is a Linux extension that drivers are
+     * free to drop, and when one does, a mark request comes back reading as
+     * plain odd - which without this passes the comparison and answers the
+     * client that the port is at mark parity while the line runs odd. That is
+     * the false success this function exists to catch. Where the platform has
+     * no such bit at all the local definition keeps this compiling, and the
+     * request then reads as not taken, which is the truth. */
+    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR;
+
+    return (check.c_cflag & verified) == (tio.c_cflag & verified);
+}
+
+/* A request that cannot be carried out has to leave the device as it was, or
+ * the answer sent back would describe neither the request nor the device */
+static bool tty_serving_device(void)
+{
+    return connected && (device_mode == DEVICE_MODE_TTY);
+}
+
+#if !defined(HAVE_TERMIOS2) && !defined(HAVE_IOSSIOSPEED)
+/* Whether the host has a termios constant for this rate, reusing the same
+ * generated cases tty_configure() switches on so the two cannot disagree.
+ * Only needed where an unrecognised rate would reach tty_configure()'s exit. */
+static bool tty_baudrate_known(int rate)
+{
+    speed_t baudrate;
+
+    switch (rate)
+    {
+        BAUDRATE_CASES
+
+        default:
+            return false;
+    }
+
+    (void) baudrate;
+
+    return true;
+}
+#endif
+
+/* Settings arriving from a socket client are not the command line: they have
+ * been through no validation at all, and tty_configure() answers a value it
+ * does not recognise by exiting the process. A client must not be able to end
+ * the session by asking a question, and RFC 2217 makes value 0 the ordinary
+ * way to ask one - it means "tell me the current setting". */
+static bool tty_baudrate_acceptable(int rate)
+{
+    if (rate <= 0)
+    {
+        return false;
+    }
+
+#if !defined(HAVE_TERMIOS2) && !defined(HAVE_IOSSIOSPEED)
+    /* Without arbitrary-rate support an unknown rate reaches the exit */
+    return tty_baudrate_known(rate);
+#else
+    return true;
+#endif
+}
+
+int tty_apply_baudrate(int baudrate)
+{
+    int previous = option.baudrate;
+
+    if (!tty_serving_device() || !tty_baudrate_acceptable(baudrate) ||
+        (baudrate == previous))
+    {
+        return previous;
+    }
+
+    option.baudrate = baudrate;
+    if (!tty_settings_took_effect())
+    {
+        option.baudrate = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return baudrate;
+}
+
+int tty_apply_databits(int databits)
+{
+    int previous = option.databits;
+
+    if (!tty_serving_device() || (databits < 5) || (databits > 8) ||
+        (databits == previous))
+    {
+        return previous;
+    }
+
+    option.databits = databits;
+    if (!tty_settings_took_effect())
+    {
+        option.databits = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return databits;
+}
+
+int tty_apply_stopbits(int stopbits)
+{
+    int previous = option.stopbits;
+
+    if (!tty_serving_device() || (stopbits < 1) || (stopbits > 2) ||
+        (stopbits == previous))
+    {
+        return previous;
+    }
+
+    option.stopbits = stopbits;
+    if (!tty_settings_took_effect())
+    {
+        option.stopbits = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return stopbits;
+}
+
+parity_t tty_apply_parity(parity_t parity)
+{
+    parity_t previous = option.parity;
+
+    if (!tty_serving_device() || (parity == previous))
+    {
+        return previous;
+    }
+
+    option.parity = parity;
+    if (!tty_settings_took_effect())
+    {
+        option.parity = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return parity;
+}
+
+void tty_apply_break(void)
+{
+    if (tty_serving_device())
+    {
+        tcsendbreak(device_fd, 0);
+    }
+}
+
+/* Drive a modem line to the state a client asked for. The interactive path
+ * toggles instead, because there a user is flipping a line rather than
+ * describing the state they want it in. */
+static void tty_line_drive(int mask, bool assert_line)
+{
+    int state;
+
+    if (!tty_serving_device() || (ioctl(device_fd, TIOCMGET, &state) < 0))
+    {
+        return;
+    }
+
+    if (assert_line)
+    {
+        state |= mask;
+    }
+    else
+    {
+        state &= ~mask;
+    }
+
+    if (ioctl(device_fd, TIOCMSET, &state) < 0)
+    {
+        tio_warning_printf("Could not set line state (%s)", strerror(errno));
+    }
+}
+
+void tty_apply_dtr(bool assert_line)
+{
+    tty_line_drive(TIOCM_DTR, assert_line);
+}
+
+void tty_apply_rts(bool assert_line)
+{
+    tty_line_drive(TIOCM_RTS, assert_line);
+}
+
+/* A socket carries no line state to read back, so what was last asked for is
+ * tracked here instead. Both lines start asserted because that is what a
+ * server does when it opens the port. */
+static int socket_line_state = TIOCM_DTR | TIOCM_RTS;
+
+static void tty_line_toggle_socket(int fd, int mask)
+{
+    telnet_line_t control_line;
+    bool assert_line;
+
+    if (mask == TIOCM_DTR)
+    {
+        control_line = TELNET_LINE_DTR;
+    }
+    else if (mask == TIOCM_RTS)
+    {
+        control_line = TELNET_LINE_RTS;
+    }
+    else
+    {
+        /* The rest are inputs; no protocol makes them writable */
+        tio_warning_printf("%s is an input line and cannot be driven over a socket",
+                           tty_line_name(mask));
+        return;
+    }
+
+    assert_line = ((socket_line_state & mask) == 0);
+
+    if (!telnet_set_line(telnet_client(), fd, control_line, assert_line))
+    {
+        device_serial_only("Toggling a serial line");
+        return;
+    }
+
+    if (assert_line)
+    {
+        socket_line_state |= mask;
+    }
+    else
+    {
+        socket_line_state &= ~mask;
+    }
+
+    tio_printf("Setting %s to %s", tty_line_name(mask), assert_line ? "LOW" : "HIGH");
+}
+
 void tty_line_toggle(int fd, int mask)
 {
     int state;
+
+    if (device_mode == DEVICE_MODE_SOCKET)
+    {
+        tty_line_toggle_socket(fd, mask);
+        return;
+    }
 
     if (ioctl(fd, TIOCMGET, &state) < 0)
     {
@@ -1011,8 +1290,9 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_G:
-                if (device_serial_only("Toggling a serial line"))
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control(telnet_client()))
                 {
+                    device_serial_only("Toggling a serial line");
                     break;
                 }
                 tio_printf("Please enter which serial line number to toggle:");
@@ -1028,8 +1308,9 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_P:
-                if (device_serial_only("Pulsing a serial line"))
+                if ((device_mode == DEVICE_MODE_SOCKET) && !telnet_serial_control(telnet_client()))
                 {
+                    device_serial_only("Pulsing a serial line");
                     break;
                 }
                 tio_printf("Please enter which serial line number to pulse:");
@@ -1045,8 +1326,12 @@ void handle_command_sequence(char input_char, char *output_char, bool *forward)
                 break;
 
             case KEY_B:
-                if (device_serial_only("Sending break"))
+                if (device_mode == DEVICE_MODE_SOCKET)
                 {
+                    if (!telnet_send_break(telnet_client(), device_fd))
+                    {
+                        device_serial_only("Sending break");
+                    }
                     break;
                 }
                 tcsendbreak(device_fd, 0);
@@ -1560,6 +1845,12 @@ void tty_reconfigure(void)
              * tcsetattr made of a speed field it had no constant for */
             setspeed(device_fd, option.baudrate);
         }
+    }
+    else if (connected && (device_mode == DEVICE_MODE_SOCKET))
+    {
+        /* The port these settings belong to is at the other end, so carry them
+         * there instead. Does nothing unless the peer took the option. */
+        telnet_send_port_settings(telnet_client(), device_fd);
     }
 }
 
@@ -2682,11 +2973,19 @@ void forward_to_device(int fd, char output_char)
 
                     if ((output_char == 0) && (option.map_o_nulbrk))
                     {
-                        if (device_serial_only("ONULBRK"))
+                        if (device_mode == DEVICE_MODE_SOCKET)
                         {
-                            return;
+                            if (!telnet_send_break(telnet_client(), fd))
+                            {
+                                device_serial_only("ONULBRK");
+                                return;
+                            }
+                            status = 0;
                         }
-                        status = tcsendbreak(fd, 0);
+                        else
+                        {
+                            status = tcsendbreak(fd, 0);
+                        }
                     }
                     else
                     {
@@ -2749,6 +3048,10 @@ int device_connect(void)
         {
             goto error_open;
         }
+
+        /* A reconnected peer negotiates again from nothing, so anything
+         * settled with the previous one must not be carried over */
+        telnet_reset(telnet_client(), TELNET_ROLE_CLIENT);
     }
     else
     {
@@ -2964,6 +3267,16 @@ int device_connect(void)
                      * has likely closed. Either way the session reconnects. */
                     tio_error_printf_silent("Could not read from device");
                     goto error_read;
+                }
+
+                if (device_mode == DEVICE_MODE_SOCKET)
+                {
+                    /* Take the protocol out here, ahead of the statistics, so
+                     * that negotiation is counted as neither received data nor
+                     * anything to display or log. A block that was nothing but
+                     * protocol leaves zero bytes and the loop below runs not
+                     * at all, which is what should happen. */
+                    bytes_read = telnet_filter_input(telnet_client(), device_fd, input_buffer, bytes_read);
                 }
 
                 /* Update receive statistics */

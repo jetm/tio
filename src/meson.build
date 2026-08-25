@@ -20,6 +20,7 @@ tio_sources = [
   'signals.c',
   'socket.c',
   'net.c',
+  'telnet.c',
   'setspeed.c',
   'rs485.c',
   'timestamp.c',

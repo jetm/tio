@@ -50,5 +50,10 @@ const char *net_socket_path(void);
 // Returns the connected file descriptor, or -1 on failure.
 int net_connect(void);
 
-// Write to a connected socket without raising SIGPIPE when the peer is gone
+// Write to a connected socket without raising SIGPIPE when the peer is gone,
+// applying whatever the negotiated protocol requires on the way out
 ssize_t net_send(int fd, const void *buffer, size_t count);
+
+// Write the bytes given and nothing else, for a caller that has already
+// applied that protocol and must not have it applied twice
+ssize_t net_send_raw(int fd, const void *buffer, size_t count);
