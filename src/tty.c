@@ -3559,6 +3559,23 @@ int device_connect(void)
      * unplugged by definition. */
     probe_immediately = true;
 
+    /* Send-only by design, not by omission: this loop writes the pipe to the
+     * device and never reads the device back, so `printf 'version\n' | tio ...`
+     * delivers the bytes and captures nothing at all - measured back to back on
+     * one board, 0 bytes in tio's own log where the same interaction through a
+     * pty (`script -q -c 'tio ...'`) logged 24034.
+     *
+     * That is upstream's own disposition, not a gap this fork introduced.
+     * Upstream had request/response here and took it out in 9753785 ("Remove
+     * options --response-wait, --response-timeout", 2024-04-13); it has not come
+     * back. Adding a read side is therefore a decision to diverge from upstream,
+     * to be argued as such and not slipped in as a bug fix.
+     *
+     * It is left alone because nothing needs it. Script mode covers programmatic
+     * request/response: script_run() below fires on every connection whenever
+     * --script-run is not "never", regardless of interactive_mode, and reads the
+     * device through its own poll path rather than this loop. So a caller that
+     * wants to send and then wait for a reply has a supported way to do it. */
     /* If stdin is a pipe forward all input to tty device */
     if (interactive_mode == false)
     {
