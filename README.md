@@ -81,6 +81,12 @@ when used in combination with [tmux](https://tmux.github.io).
    * Useful for scripting or TTY sharing
  * Connect to a UNIX socket or IPv4/v6 network socket as a client
    * Attach to a TTY shared by another tio, or to a serial-over-network server
+   * RFC 2217 support, so baud rate, framing, break and modem lines reach the
+     remote port when the server offers the option
+   * Only settings named on the command line are sent, so attaching to a
+     console leaves it as it was found
+   * Optionally offer RFC 2217 to clients of `--socket`; the default stays a
+     raw byte stream
  * Pipe input and/or output
  * Bash completion on options, serial device names, and profile names
  * Configurable tio message text color
@@ -139,6 +145,7 @@ Options:
   -m, --map <flags>                      Map characters
   -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)
   -S, --socket <socket>                  Redirect I/O to socket
+      --socket-rfc2217                   Offer RFC 2217 to socket clients
       --rs-485                           Enable RS-485 mode
       --rs-485-config <config>           Set RS-485 configuration
       --alert bell|blink|none            Alert on connect/disconnect (default: none)
@@ -286,6 +293,18 @@ $ tio inet:hostname:4242
 Connect to a UNIX socket shared by another tio:
 ```
 $ tio unix:/tmp/tio.sock
+```
+
+Connect to a serial-over-network server speaking RFC 2217, setting the remote
+port's baud rate:
+```
+$ tio --baudrate 9600 inet:hostname:3001
+```
+
+Share a device and let clients configure it over RFC 2217. Without
+`--socket-rfc2217` the socket stays a raw byte stream, which is the default:
+```
+$ tio --socket inet:4242 --socket-rfc2217 /dev/ttyUSB0
 ```
 
 Map NL to CR-NL on input from device and DEL to BS on output to device:

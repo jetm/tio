@@ -961,10 +961,12 @@ void options_parse(int argc, char *argv[])
 
             case 'b':
                 option_string_to_integer(optarg, &option.baudrate, "baudrate", 0, INT_MAX);
+                option.baudrate_set = true;
                 break;
 
             case 'd':
                 option_string_to_integer(optarg, &option.databits, "databits", 5, 8);
+                option.databits_set = true;
                 break;
 
             case 'f':
@@ -973,10 +975,12 @@ void options_parse(int argc, char *argv[])
 
             case 's':
                 option_string_to_integer(optarg, &option.stopbits, "stopbits", 1, 2);
+                option.stopbits_set = true;
                 break;
 
             case 'p':
                 option_parse_parity(optarg, &option.parity);
+                option.parity_set = true;
                 break;
 
             case 'o':

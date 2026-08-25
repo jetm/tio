@@ -247,11 +247,16 @@ inline static unsigned char char_to_nibble(char c)
 #define FLUSH_POLL_MS       100
 #define FLUSH_MAX_STALLED   100
 
-void device_sync(int fd)
+/* Returns whether the whole buffer went out. Callers that have nothing to do about a
+ * failure may ignore it - the warnings below are theirs either way - but the one that
+ * forwards piped input must not, because for a scripted caller the exit status is the
+ * entire interface. */
+bool device_sync(int fd)
 {
     char *read_ptr = tty_buffer;
     size_t remaining = tty_buffer_count;
     int attempts = FLUSH_MAX_STALLED;
+    bool complete = true;
     ssize_t count;
 
     while (remaining > 0)
@@ -281,6 +286,7 @@ void device_sync(int fd)
             }
             tio_warning_printf("Write error while flushing tty buffer, %zu bytes lost (%s)",
                     remaining, strerror(errno));
+            complete = false;
             break;
         }
         if (count == 0)
@@ -289,6 +295,7 @@ void device_sync(int fd)
              * of nothing advances no pointer and frees no budget, which turns
              * this into a busy spin with no way out. */
             tio_warning_printf("Write stalled while flushing tty buffer, %zu bytes lost", remaining);
+            complete = false;
             break;
         }
         read_ptr += count;
@@ -304,6 +311,8 @@ void device_sync(int fd)
     // Reset
     tty_buffer_write_ptr = tty_buffer;
     tty_buffer_count = 0;
+
+    return complete;
 }
 
 ssize_t device_write(int fd, const void *buffer, size_t count)
@@ -374,7 +383,15 @@ ssize_t device_write(int fd, const void *buffer, size_t count)
         // Force write of tty buffer if too full
         if ((tty_buffer_count + count) > BUFSIZ)
         {
-            device_sync(fd);
+            if (!device_sync(fd))
+            {
+                /* Report it. This flush is the only one a bulk caller ever reaches - a
+                 * producer that always has more ready never lets the caller sync on its
+                 * own - so swallowing the failure here is what let `yes | tio` warn per
+                 * 8192 bytes forever against a peer that had gone. The caller's own
+                 * error path is already in place; it was just never told. */
+                return -1;
+            }
         }
 
         // Copy bytes to tty write buffer
@@ -1648,6 +1665,13 @@ void tty_configure(void)
     speed_t baudrate;
 
     memset(&tio, 0, sizeof(tio));
+
+    /* Describes the rate being configured now, not the first one ever
+     * configured. This was a one-shot at startup until a socket client could
+     * ask for a rate mid-session: left latched, one arbitrary rate would turn
+     * the speed verification off for every request after it, including the
+     * standard ones. */
+    standard_baudrate = true;
 
     /* Set speed */
     switch (option.baudrate)
@@ -3179,17 +3203,56 @@ int device_connect(void)
             }
             else if (ret > 0)
             {
-                // Forward to tty device
-                ret = write(device_fd, &input_char, 1);
+                /* Through device_write, not write: on a socket target this is the
+                 * only path that doubles the protocol marker, suppresses SIGPIPE and
+                 * retries a partial send. A raw write reaches a socket fd perfectly
+                 * well, which is why this looked correct - it just delivers a lone
+                 * 0xFF to a peer that reads it as the start of a command. */
+                ret = device_write(device_fd, &input_char, 1);
                 if (ret < 0)
                 {
-                    tio_error_printf("Could not write to serial device (%s)", strerror(errno));
+                    tio_error_printf("Could not write to device (%s)", strerror(errno));
                     exit(EXIT_FAILURE);
+                }
+
+                /* device_write buffers, so something here has to decide when the
+                 * buffer goes out. Neither obvious answer works: a sync per byte puts
+                 * a tcdrain between every byte of a bulk transfer, and a sync only at
+                 * EOF holds a slow producer's bytes back completely - `tail -f | tio`
+                 * fed the device nothing at all until the pipe closed, which is how
+                 * this was found. Sync when the producer has nothing more ready and
+                 * both cases come out right. */
+                struct pollfd more = { .fd = pipefd[0], .events = POLLIN, .revents = 0 };
+                if (poll(&more, 1, 0) <= 0)
+                {
+                    /* <= 0, not == 0. poll returning -1 on a signal is not "more data is
+                     * ready", and treating it as such left the byte in the buffer waiting
+                     * for a successor that a paused producer may never send. */
+                    if (!device_sync(device_fd))
+                    {
+                        /* The delivery failure that the raw write used to report here.
+                         * Moving to device_write moved the failure into the flush, which
+                         * only warned - so a peer that died mid-stream left this loop
+                         * draining stdin to EOF and exiting 0 on a finite input, or
+                         * warning per 8192 bytes forever on an endless one. */
+                        tio_error_printf("Could not write to device (%s)", strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
                 }
             }
             else
             {
-                // EOF - finished forwarding
+                /* EOF - finished forwarding. Sync before leaving: device_write
+                 * buffers and only flushes itself when the buffer would overrun, so
+                 * whatever is left of the last BUFSIZ is still in memory here. The
+                 * raw write this replaced needed no counterpart, which is why moving
+                 * to device_write silently delivered nothing at all for any input
+                 * short enough to fit the buffer. */
+                if (!device_sync(device_fd))
+                {
+                    tio_error_printf("Could not write to device (%s)", strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
                 break;
             }
         }

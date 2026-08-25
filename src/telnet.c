@@ -19,6 +19,7 @@
  * 02110-1301, USA.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -209,37 +210,55 @@ void telnet_send_port_settings(telnet_t *telnet, int fd)
         return;
     }
 
-    if (telnet->settings_sent &&
-        (telnet->requested_baudrate == option.baudrate) &&
-        (telnet->requested_databits == option.databits) &&
-        (telnet->requested_stopbits == option.stopbits) &&
-        (telnet->requested_parity == parity_value(option.parity)))
+    /* Only what was actually asked for, and only when it has changed since it
+     * was last sent. A remote port is somebody's console and reconfiguring one
+     * nobody asked to change is not harmless: applying a rate to a live line
+     * can glitch it into a break, and a break on a Linux console arms SysRq,
+     * whose next character is the command. Attaching to a console must not be
+     * able to reboot the far end, and neither must pressing a mapping key.
+     *
+     * Each setting carries its own comparison. A single guard over all four
+     * could not work: a setting the user never named keeps the zero it was
+     * reset to while the option holds its default, so the guard never matched
+     * and every reconfigure resent the ones that were named.
+     *
+     * Zero doubles as "not sent yet" because it is not a value any of the four
+     * is ever sent with, which is a narrower claim than it being invalid. A
+     * zero baud rate is real - it is in the probed rate list, B0 hangs a local
+     * line up, and -b 0 is accepted - but it never reaches the wire: the
+     * inbound check rejects it, and RFC 2217 reserves zero on all four setting
+     * commands for "report the current value", so sending it would ask a
+     * question rather than hang the far end up. */
+    if (option.baudrate_set && (telnet->requested_baudrate != option.baudrate))
     {
-        /* Reached from a reconfigure that changed something else - resending
-         * would put four lines of settings on screen for a mapping keypress */
-        return;
+        telnet->requested_baudrate = option.baudrate;
+        values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
+        values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
+        values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
+        values[3] = (unsigned char) ((unsigned int) option.baudrate);
+        send_subneg(fd, COM_SET_BAUDRATE, values, 4);
     }
 
-    telnet->settings_sent = true;
+    if (option.databits_set && (telnet->requested_databits != option.databits))
+    {
+        telnet->requested_databits = option.databits;
+        values[0] = (unsigned char) option.databits;
+        send_subneg(fd, COM_SET_DATASIZE, values, 1);
+    }
 
-    telnet->requested_baudrate = option.baudrate;
-    values[0] = (unsigned char) ((unsigned int) option.baudrate >> 24);
-    values[1] = (unsigned char) ((unsigned int) option.baudrate >> 16);
-    values[2] = (unsigned char) ((unsigned int) option.baudrate >> 8);
-    values[3] = (unsigned char) ((unsigned int) option.baudrate);
-    send_subneg(fd, COM_SET_BAUDRATE, values, 4);
+    if (option.parity_set && (telnet->requested_parity != parity_value(option.parity)))
+    {
+        telnet->requested_parity = parity_value(option.parity);
+        values[0] = (unsigned char) telnet->requested_parity;
+        send_subneg(fd, COM_SET_PARITY, values, 1);
+    }
 
-    telnet->requested_databits = option.databits;
-    values[0] = (unsigned char) option.databits;
-    send_subneg(fd, COM_SET_DATASIZE, values, 1);
-
-    telnet->requested_parity = parity_value(option.parity);
-    values[0] = (unsigned char) telnet->requested_parity;
-    send_subneg(fd, COM_SET_PARITY, values, 1);
-
-    telnet->requested_stopbits = option.stopbits;
-    values[0] = (unsigned char) option.stopbits;
-    send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+    if (option.stopbits_set && (telnet->requested_stopbits != option.stopbits))
+    {
+        telnet->requested_stopbits = option.stopbits;
+        values[0] = (unsigned char) option.stopbits;
+        send_subneg(fd, COM_SET_STOPSIZE, values, 1);
+    }
 }
 
 bool telnet_serial_control(const telnet_t *telnet)
@@ -450,7 +469,24 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
         case COM_SET_PARITY:
             if (telnet->subneg_length >= 3)
             {
-                parity_t got = tty_apply_parity(parity_from_value(telnet->subneg[2]));
+                parity_t got;
+
+                if ((telnet->subneg[2] < PARITY_VALUE_NONE) ||
+                    (telnet->subneg[2] > PARITY_VALUE_SPACE))
+                {
+                    /* Same rule as the other three settings: a value this does
+                     * not recognise is answered with what the port is set to
+                     * rather than acted on. Zero arrives here in normal use -
+                     * it is how a client asks what the current setting is -
+                     * and mapping it onto a parity would answer the question
+                     * by changing the answer. */
+                    got = option.parity;
+                }
+                else
+                {
+                    got = tty_apply_parity(parity_from_value(telnet->subneg[2]));
+                }
+
                 values[0] = parity_value(got);
                 send_subneg(fd, COM_SET_PARITY + SERVER_OFFSET, values, 1);
             }
@@ -512,6 +548,20 @@ static void handle_subneg(const telnet_t *telnet, int fd)
 
     if (telnet->role == TELNET_ROLE_SERVER)
     {
+        if (!telnet->remote_enabled[OPT_COM_PORT])
+        {
+            /* The client never took the option. Acting on its requests anyway
+             * would let a peer that declined the protocol - or never answered
+             * at all - configure the port the protocol governs.
+             *
+             * Say so rather than dropping it silently: a client that treats the
+             * unsolicited offer as sufficient and never answers is the first
+             * thing this rejects, and from the far end it looks like requests
+             * vanishing for no reason. */
+            tio_debug_printf("Ignoring serial port request from a client that has not taken the option");
+            return;
+        }
+
         handle_com_port_request(telnet, fd);
     }
     else
@@ -726,8 +776,46 @@ ssize_t telnet_send(int fd, const void *buffer, size_t count)
     {
         ssize_t status = net_send_raw(fd, escaped + sent, produced - sent);
 
+        if (status < 0)
+        {
+            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
+            {
+                /* Nothing has gone wrong with the stream, so carry on from
+                 * where this stopped. Giving up here is what left a doubled
+                 * marker split down the middle. */
+                continue;
+            }
+        }
+
         if (status <= 0)
         {
+            /* Report the caller's bytes whose escaped form went out in full,
+             * and let it re-supply the rest.
+             *
+             * Returning the error instead threw away how much had already been
+             * sent, and the caller - which resumes from what it was told went
+             * out - resent those bytes on top of the ones already on the wire.
+             * That is the mirror of losing them: the wire gained bytes because
+             * the accounting fell behind it. */
+            size_t escaped_len = 0;
+            size_t whole = 0;
+
+            while (whole < consumed)
+            {
+                size_t width = (input[whole] == IAC) ? 2u : 1u;
+
+                if ((escaped_len + width) > sent)
+                {
+                    break;
+                }
+                escaped_len += width;
+                whole++;
+            }
+
+            if (whole > 0)
+            {
+                return (ssize_t) whole;
+            }
             return status;
         }
 
