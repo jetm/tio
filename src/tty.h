@@ -112,6 +112,7 @@ int tty_apply_baudrate(int baudrate);
 int tty_apply_databits(int databits);
 int tty_apply_stopbits(int stopbits);
 parity_t tty_apply_parity(parity_t parity);
+flow_t tty_apply_flow(flow_t flow);
 
 // Send a break on the device being served, at a client's request
 void tty_apply_break(void);
@@ -130,8 +131,10 @@ bool tty_dtr_asserted(void);
 bool tty_rts_asserted(void);
 
 // Discard buffered data on the device being served, at a client's request.
-// Discards what has arrived, what is waiting to go out, or both.
-void tty_apply_purge(bool input, bool output);
+// Discards what has arrived, what is waiting to go out, or both. Returns whether
+// anything was actually discarded, so the answer sent back can describe what the
+// port did rather than what was asked of it.
+bool tty_apply_purge(bool input, bool output);
 
 void tty_search(void);
 GList *tty_search_for_serial_devices(void);

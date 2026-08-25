@@ -149,7 +149,13 @@ static void handle_remote_offer(telnet_t *telnet, int fd, unsigned char opt, boo
         return;
     }
 
-    send_command(fd, wanted ? DO : DONT, opt);
+    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_do_sent))
+    {
+        /* Skipped only when this is the peer agreeing to a DO already sent from
+         * here: repeating it would be a second request for the same option.
+         * Mirrors the same test on the WILL side. */
+        send_command(fd, wanted ? DO : DONT, opt);
+    }
     telnet->remote_enabled[opt] = wanted;
     telnet->remote_answered[opt] = true;
 }
@@ -163,19 +169,27 @@ static void handle_local_request(telnet_t *telnet, int fd, unsigned char opt, bo
         return;
     }
 
-    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_offered))
+    if (!(wanted && (opt == OPT_COM_PORT) && telnet->com_port_will_sent))
     {
-        /* Skipped only when this is the peer agreeing to an offer already made
-         * from here: repeating it would be a second offer of the same option */
+        /* Skipped only when this is the peer agreeing to a WILL already sent from
+         * here: repeating it would be a second offer of the same option */
         send_command(fd, wanted ? WILL : WONT, opt);
     }
     telnet->local_enabled[opt] = wanted;
     telnet->local_answered[opt] = true;
 
-    if (wanted && (opt == OPT_COM_PORT))
+    if (wanted && (opt == OPT_COM_PORT) && (telnet->role == TELNET_ROLE_CLIENT))
     {
         /* The option is live now, so the settings the user asked for on the
-         * command line can be carried to the remote port */
+         * command line can be carried to the remote port.
+         *
+         * Only from the client. These are requests - the command numbers without
+         * the server offset - and a server has no remote port to configure. This
+         * function serves both roles, so without the test a client sending the
+         * legal IAC DO COM-PORT made the server answer correctly and then send it
+         * a client's requests, which is a direction the protocol has no meaning
+         * in. A peer that negotiates both directions of an option sends exactly
+         * that; the harness's own test server opens with it. */
         telnet_send_port_settings(telnet, fd);
     }
 }
@@ -519,12 +533,53 @@ static control_group_t control_group(unsigned char request)
 /* Carry out a request. Only the set values do anything: a request value asks
  * what the state is and must leave it alone, which is what makes reading the
  * table correctly load-bearing rather than cosmetic. */
+/* The three flow-control modes a client can name, in either direction. RFC 2217
+ * numbers them from the group's request value, so the offset is the same on both
+ * sides and one mapping serves both. */
+static flow_t control_flow_mode(unsigned char request, unsigned char group_base)
+{
+    switch (request - group_base)
+    {
+        case 2:
+            return FLOW_SOFT;
+
+        case 3:
+            return FLOW_HARD;
+
+        default:
+            return FLOW_NONE;
+    }
+}
+
 static void control_apply(unsigned char request)
 {
     switch (request)
     {
         case CONTROL_BREAK_ON:
             tty_apply_break();
+            break;
+
+        case CONTROL_FLOW_NONE:
+        case CONTROL_FLOW_SOFT:
+        case CONTROL_FLOW_HARD:
+            /* Carried rather than echoed. This was the one group that answered
+             * without applying: a client asking for no flow control against a
+             * server running hardware flow was silently not given the setting and
+             * then correctly told the port was at hardware - two truthful halves
+             * that add up to a refusal the client cannot act on. pyserial reads
+             * that as an open failure, and by this code's own rule for every
+             * other setting it is right to. */
+            tty_apply_flow(control_flow_mode(request, CONTROL_FLOW_REQUEST));
+            break;
+
+        case CONTROL_FLOW_IN_NONE:
+        case CONTROL_FLOW_IN_SOFT:
+        case CONTROL_FLOW_IN_HARD:
+            /* A serial port has one flow-control configuration, not one per
+             * direction: IXON and IXOFF are set together by software flow, and
+             * CRTSCTS governs both ways. So the inbound request names the same
+             * setting from the other side rather than a second one. */
+            tty_apply_flow(control_flow_mode(request, CONTROL_FLOW_IN_REQUEST));
             break;
 
         case CONTROL_DTR_ON:
@@ -539,8 +594,9 @@ static void control_apply(unsigned char request)
 
         default:
             /* Break-off needs nothing, since the break already released the
-             * line; flow control is not offered; and every request value is a
-             * question rather than an instruction. */
+             * line; the flow-control modes keyed off a modem line are not
+             * implementable here; and every request value is a question rather
+             * than an instruction. */
             break;
     }
 }
@@ -551,8 +607,10 @@ static unsigned char control_state(unsigned char request)
     switch (control_group(request))
     {
         case CONTROL_GROUP_FLOW_OUT:
-            /* A client cannot change it here, so the answer is what the port was
-             * configured with rather than what was asked for. */
+            /* What the port is at now, which after an apply is what it took and
+             * not necessarily what was asked for - the same rule as every other
+             * setting. Read back rather than remembered, so a mode the device
+             * refused is reported as refused. */
             return (unsigned char) tty_flow_control_value();
 
         case CONTROL_GROUP_FLOW_IN:
@@ -679,10 +737,21 @@ static void handle_com_port_request(const telnet_t *telnet, int fd)
                  * for it during open - so leaving it unimplemented stopped the
                  * session getting established at all, the same way an
                  * unanswered control request did. */
-                tty_apply_purge((what == PURGE_RX) || (what == PURGE_BOTH),
-                        (what == PURGE_TX) || (what == PURGE_BOTH));
+                bool input = (what == PURGE_RX) || (what == PURGE_BOTH);
+                bool output = (what == PURGE_TX) || (what == PURGE_BOTH);
+                unsigned char done = 0;
 
-                values[0] = what;
+                if (tty_apply_purge(input, output))
+                {
+                    done = what;
+                }
+
+                /* Answer with what was discarded, not with what was asked for.
+                 * Every other command in this switch reports the value the port
+                 * ended up at; echoing the request told a client that sent an
+                 * undefined value - or one whose flush failed - that it had been
+                 * carried out. */
+                values[0] = done;
                 send_subneg(fd, COM_PURGE_DATA + SERVER_OFFSET, values, 1);
             }
             break;
@@ -753,6 +822,17 @@ void telnet_server_offer(telnet_t *telnet, int fd)
     telnet->remote_answered[OPT_BINARY] = true;
 
     send_command(fd, DO, OPT_COM_PORT);
+
+    /* Record that the offer was made, so the client's answer is read as an answer
+     * rather than as an unsolicited offer needing one - which is what drew a
+     * second DO for the same option on every negotiated session.
+     *
+     * Deliberately NOT remote_enabled/remote_answered, which the two lines above
+     * do set for binary. remote_enabled[OPT_COM_PORT] is the test that refuses
+     * serial requests from a client that never took the option; asserting it here
+     * would mean a client that ignores the offer and sends requests anyway gets
+     * them honoured. Asking is not being answered. */
+    telnet->com_port_do_sent = true;
 }
 
 static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsigned char opt)
@@ -789,10 +869,10 @@ static void handle_option(telnet_t *telnet, int fd, unsigned char command, unsig
      * put three protocol bytes in front of a peer that speaks no protocol, and
      * tio's own socket server forwards whatever it is sent straight to the
      * serial device, so those bytes would land on somebody's console. */
-    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_offered
+    if ((telnet->role == TELNET_ROLE_CLIENT) && !telnet->com_port_will_sent
             && !telnet->local_answered[OPT_COM_PORT])
     {
-        telnet->com_port_offered = true;
+        telnet->com_port_will_sent = true;
         send_command(fd, WILL, OPT_COM_PORT);
     }
 }
@@ -905,13 +985,23 @@ size_t telnet_filter_input(telnet_t *telnet, int fd, char *buffer, size_t count)
     return kept;
 }
 
-ssize_t telnet_send(int fd, const void *buffer, size_t count)
+ssize_t telnet_send(const telnet_t *telnet, int fd, const void *buffer, size_t count)
 {
     const unsigned char *input = (const unsigned char *) buffer;
     unsigned char escaped[2 * BUFSIZ];
     size_t consumed = 0;
     size_t produced = 0;
     size_t sent = 0;
+
+    if (!telnet_engaged(telnet))
+    {
+        /* Not a Telnet peer, so a byte equal to the command marker is a byte.
+         * Deciding that here rather than at the call sites is the point: the rule
+         * was implemented twice, once here and once inline for the server, and
+         * two encodings of one rule are what let the read and write sides drift
+         * apart before. */
+        return net_send_raw(fd, buffer, count);
+    }
 
     /* Stop short of the caller's buffer rather than overrun ours; the caller
      * writes what is left on the next call */

@@ -363,10 +363,8 @@ ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 
 ssize_t net_send(int fd, const void *buffer, size_t count)
 {
-    if (telnet_engaged(telnet_client()))
-    {
-        return telnet_send(fd, buffer, count);
-    }
-
-    return net_send_raw(fd, buffer, count);
+    /* The peer this session connects to as a client. Whether it speaks Telnet is
+     * a property of that context, and telnet_send() reads it, so there is no
+     * decision left to make here. */
+    return telnet_send(telnet_client(), fd, buffer, count);
 }

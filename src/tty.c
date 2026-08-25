@@ -684,9 +684,17 @@ static bool tty_settings_took_effect(void)
      * the false success this function exists to catch. Where the platform has
      * no such bit at all the local definition keeps this compiling, and the
      * request then reads as not taken, which is the truth. */
-    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR;
+    const tcflag_t verified = CSIZE | CSTOPB | PARENB | PARODD | CMSPAR | CRTSCTS;
 
-    return (check.c_cflag & verified) == (tio.c_cflag & verified);
+    /* Flow control straddles the two flag words: hardware flow lives in c_cflag
+     * with the framing bits above, software flow in c_iflag, which nothing here
+     * used to read. Verifying only c_cflag would let a software-flow request
+     * report success without checking anything at all - the same false success
+     * the CMSPAR bit is in the mask to prevent, one word over. */
+    const tcflag_t verified_input = IXON | IXOFF | IXANY;
+
+    return ((check.c_cflag & verified) == (tio.c_cflag & verified))
+            && ((check.c_iflag & verified_input) == (tio.c_iflag & verified_input));
 }
 
 /* A request that cannot be carried out has to leave the device as it was, or
@@ -801,6 +809,26 @@ int tty_apply_stopbits(int stopbits)
     return stopbits;
 }
 
+flow_t tty_apply_flow(flow_t flow)
+{
+    flow_t previous = option.flow;
+
+    if (!tty_serving_device() || (flow == previous))
+    {
+        return previous;
+    }
+
+    option.flow = flow;
+    if (!tty_settings_took_effect())
+    {
+        option.flow = previous;
+        tty_reconfigure();
+        return previous;
+    }
+
+    return flow;
+}
+
 parity_t tty_apply_parity(parity_t parity)
 {
     parity_t previous = option.parity;
@@ -829,7 +857,19 @@ parity_t tty_apply_parity(parity_t parity)
  *
  * A quarter second is roughly one break's own duration, so a client sending them
  * back to back is slowed to the rate the line can carry rather than refused, and
- * a client using break as it is meant to be used never notices. */
+ * a client using break as it is meant to be used never notices.
+ *
+ * devtool-debt: the interval is a judgement, not a measurement, and it bounds a
+ * burst rather than a duty cycle. tcsendbreak(fd, 0) asserts for an
+ * implementation-defined 0.25 to 0.5 seconds, and the interval is timed from the
+ * START of the previous break, so a client pacing its requests just over the
+ * interval gets every one of them and can hold the line in break more or less
+ * continuously. What this does stop is the case that was measured - a stream of
+ * NULs arriving inside one window, 40 requests reduced to one break.
+ * Ceiling: bursts faster than the interval. It does NOT bound the duty cycle.
+ * Upgrade trigger: a break receiver on the bench, which would give the platform's
+ * real break duration and let the interval be set against it rather than guessed;
+ * or a report of a line held in break by a paced client. */
 #define BREAK_MIN_INTERVAL_MS 250
 
 void tty_apply_break(void)
@@ -944,13 +984,13 @@ bool tty_rts_asserted(void)
     return tty_line_asserted(TIOCM_RTS);
 }
 
-void tty_apply_purge(bool input, bool output)
+bool tty_apply_purge(bool input, bool output)
 {
     int queue;
 
     if (!tty_serving_device())
     {
-        return;
+        return false;
     }
 
     if (input && output)
@@ -967,13 +1007,16 @@ void tty_apply_purge(bool input, bool output)
     }
     else
     {
-        return;
+        return false;
     }
 
     if (tcflush(device_fd, queue) < 0)
     {
         tio_warning_printf("Could not discard buffered data (%s)", strerror(errno));
+        return false;
     }
+
+    return true;
 }
 
 /* A socket carries no line state to read back, so what was last asked for is
@@ -3194,6 +3237,12 @@ int device_connect(void)
         /* A reconnected peer negotiates again from nothing, so anything
          * settled with the previous one must not be carried over */
         telnet_reset(telnet_client(), TELNET_ROLE_CLIENT, option.rfc2217);
+
+        /* The cached line state is settled with a peer too, so it belongs to the
+         * same reset. A remote port reopens with both lines asserted; a cache
+         * left saying DTR was dropped would make the next toggle assert a line
+         * that was already asserted and report a change that did not happen. */
+        socket_line_state = TIOCM_DTR | TIOCM_RTS;
     }
     else
     {
