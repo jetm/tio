@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "socket.h"
+#include "net.h"
 #include "options.h"
 #include "print.h"
 #include "telnet.h"
@@ -297,11 +298,14 @@ void socket_write(char input_char)
                 length = 2;
             }
 
-#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-            if (send(clientfds[i], buffer, length, 0) <= 0)
-#else
-            if (send(clientfds[i], buffer, length, MSG_NOSIGNAL) <= 0)
-#endif
+            /* Send all of it, and treat a partial send as the failure it is.
+             * This used to write one byte, where a short send was impossible and
+             * checking for non-positive was a complete test. Doubling the marker
+             * made it two, and a return of one then took neither the error path
+             * nor a retry: the second marker was dropped, and the client read the
+             * surviving one as the start of a command and ate the device byte
+             * after it - desynchronised for the rest of the session. */
+            if (net_send_raw(clientfds[i], buffer, length) != (ssize_t) length)
             {
                 tio_error_printf_silent("Failed to write to socket (%s)", strerror(errno));
                 close(clientfds[i]);
@@ -399,15 +403,12 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
             if (clientfds[i] == -1)
             {
                 clientfds[i] = clientfd;
-                telnet_reset(&clienttelnet[i], TELNET_ROLE_SERVER);
+                telnet_reset(&clienttelnet[i], TELNET_ROLE_SERVER, option.socket_rfc2217);
 
-                if (option.socket_rfc2217)
-                {
-                    /* Speak first, since a client has no way to know the
-                     * option is on offer otherwise. Without the flag nothing
-                     * is sent and the socket stays the raw pipe it was. */
-                    telnet_server_offer(&clienttelnet[i], clientfd);
-                }
+                /* Speak first, since a client has no way to know the option is
+                 * on offer otherwise. Without the flag the offer is not made and
+                 * the socket stays the raw pipe it was. */
+                telnet_server_offer(&clienttelnet[i], clientfd);
                 break;
             }
         }
@@ -431,13 +432,12 @@ bool socket_handle_input(fd_set *rdfs, char *output_char)
                 continue;
             }
 
-            /* Only a socket that was told to speak Telnet parses it. Without
-             * the option this is the byte pipe it has always been, in both
-             * directions, and a client cannot reach the serial port's
-             * configuration by sending bytes that happen to look like
-             * protocol. */
-            if (option.socket_rfc2217 &&
-                (telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1) == 0))
+            /* Only a socket that was told to speak Telnet parses it, which the
+             * context itself knows. Without the option this is the byte pipe it
+             * has always been, in both directions, and a client cannot reach the
+             * serial port's configuration by sending bytes that happen to look
+             * like protocol. */
+            if (telnet_filter_input(&clienttelnet[i], clientfds[i], output_char, 1) == 0)
             {
                 return false;
             }

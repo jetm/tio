@@ -821,11 +821,49 @@ parity_t tty_apply_parity(parity_t parity)
     return parity;
 }
 
+/* Shortest gap between two breaks a client can ask for. A break holds the line
+ * and blocks the loop that serves every other client for as long as it lasts, so
+ * an unlimited stream of requests makes both the device and the server unusable -
+ * and the option is reachable over an unauthenticated network socket. The
+ * negotiation gate bounds who may ask, not how often.
+ *
+ * A quarter second is roughly one break's own duration, so a client sending them
+ * back to back is slowed to the rate the line can carry rather than refused, and
+ * a client using break as it is meant to be used never notices. */
+#define BREAK_MIN_INTERVAL_MS 250
+
 void tty_apply_break(void)
 {
-    if (tty_serving_device())
+    static struct timespec last_break = { 0, 0 };
+    struct timespec now;
+    long elapsed_ms;
+
+    if (!tty_serving_device())
     {
-        tcsendbreak(device_fd, 0);
+        return;
+    }
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+    {
+        if ((last_break.tv_sec != 0) || (last_break.tv_nsec != 0))
+        {
+            elapsed_ms = ((now.tv_sec - last_break.tv_sec) * 1000L)
+                    + ((now.tv_nsec - last_break.tv_nsec) / 1000000L);
+
+            if (elapsed_ms < BREAK_MIN_INTERVAL_MS)
+            {
+                tio_debug_printf("Ignoring a break requested %ld ms after the last one", elapsed_ms);
+                return;
+            }
+        }
+        last_break = now;
+    }
+
+    if (tcsendbreak(device_fd, 0) < 0)
+    {
+        /* Reported here rather than at each caller, so a break that could not be
+         * sent is not silent on one path and diagnosed on another */
+        tio_warning_printf("Could not send break to tty device (%s)", strerror(errno));
     }
 }
 
@@ -864,6 +902,78 @@ void tty_apply_dtr(bool assert_line)
 void tty_apply_rts(bool assert_line)
 {
     tty_line_drive(TIOCM_RTS, assert_line);
+}
+
+int tty_flow_control_value(void)
+{
+    switch (option.flow)
+    {
+        case FLOW_SOFT:
+            return 2;
+
+        case FLOW_HARD:
+            return 3;
+
+        default:
+            return 1;
+    }
+}
+
+/* Reading the line rather than remembering what was last asked for: a request
+ * has to be answered with what the port is doing, and a driver is free not to
+ * have done what it was told. */
+static bool tty_line_asserted(int mask)
+{
+    int state;
+
+    if (!tty_serving_device() || (ioctl(device_fd, TIOCMGET, &state) < 0))
+    {
+        return false;
+    }
+
+    return (state & mask) != 0;
+}
+
+bool tty_dtr_asserted(void)
+{
+    return tty_line_asserted(TIOCM_DTR);
+}
+
+bool tty_rts_asserted(void)
+{
+    return tty_line_asserted(TIOCM_RTS);
+}
+
+void tty_apply_purge(bool input, bool output)
+{
+    int queue;
+
+    if (!tty_serving_device())
+    {
+        return;
+    }
+
+    if (input && output)
+    {
+        queue = TCIOFLUSH;
+    }
+    else if (input)
+    {
+        queue = TCIFLUSH;
+    }
+    else if (output)
+    {
+        queue = TCOFLUSH;
+    }
+    else
+    {
+        return;
+    }
+
+    if (tcflush(device_fd, queue) < 0)
+    {
+        tio_warning_printf("Could not discard buffered data (%s)", strerror(errno));
+    }
 }
 
 /* A socket carries no line state to read back, so what was last asked for is
@@ -3008,7 +3118,15 @@ void forward_to_device(int fd, char output_char)
                         }
                         else
                         {
-                            status = tcsendbreak(fd, 0);
+                            /* Through the same gate the protocol path uses. This
+                             * one needs no negotiation at all - a plain socket
+                             * client sending NUL bytes reaches a break on the
+                             * served device - so leaving it ungated left the
+                             * cheaper of the two paths open. A suppressed break
+                             * is not an error, and a failed one is reported
+                             * inside. */
+                            tty_apply_break();
+                            status = 0;
                         }
                     }
                     else
@@ -3075,7 +3193,7 @@ int device_connect(void)
 
         /* A reconnected peer negotiates again from nothing, so anything
          * settled with the previous one must not be carried over */
-        telnet_reset(telnet_client(), TELNET_ROLE_CLIENT);
+        telnet_reset(telnet_client(), TELNET_ROLE_CLIENT, option.rfc2217);
     }
     else
     {

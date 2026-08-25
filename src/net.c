@@ -319,11 +319,46 @@ int net_connect(void)
 
 ssize_t net_send_raw(int fd, const void *buffer, size_t count)
 {
+    const char *at = (const char *) buffer;
+    size_t sent = 0;
+
+    /* Send all of it. A protocol message is only meaningful whole: half a
+     * subnegotiation leaves the peer waiting for a terminator that is never
+     * coming, and it swallows the device output that follows until it happens to
+     * find one - which may be never. The callers that write those messages
+     * discard the return value, so a short send here was silent, unbounded, and
+     * landed on the peer rather than on us.
+     *
+     * Reachable only through a signal arriving mid-transfer, since the socket is
+     * blocking and these messages are a few bytes - but the cost of being wrong
+     * is a wedged session, and the loop is three lines. */
+    while (sent < count)
+    {
+        ssize_t status;
+
 #if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
-    return send(fd, buffer, count, 0);
+        status = send(fd, at + sent, count - sent, 0);
 #else
-    return send(fd, buffer, count, MSG_NOSIGNAL);
+        status = send(fd, at + sent, count - sent, MSG_NOSIGNAL);
 #endif
+        if (status < 0)
+        {
+            if ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))
+            {
+                continue;
+            }
+            /* Report the error only when none of it went out; otherwise report
+               what did, so a caller that checks can see the shortfall. */
+            return (sent > 0) ? (ssize_t) sent : status;
+        }
+        if (status == 0)
+        {
+            break;
+        }
+        sent += (size_t) status;
+    }
+
+    return (ssize_t) sent;
 }
 
 ssize_t net_send(int fd, const void *buffer, size_t count)

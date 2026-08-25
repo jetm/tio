@@ -121,5 +121,17 @@ void tty_apply_break(void);
 void tty_apply_dtr(bool assert_line);
 void tty_apply_rts(bool assert_line);
 
+// Report what the served device is doing, so a client's request about it can be
+// answered with the state rather than with silence. Flow control comes back as
+// 1 for none, 2 for software and 3 for hardware, which is the numbering the
+// protocol uses for it.
+int tty_flow_control_value(void);
+bool tty_dtr_asserted(void);
+bool tty_rts_asserted(void);
+
+// Discard buffered data on the device being served, at a client's request.
+// Discards what has arrived, what is waiting to go out, or both.
+void tty_apply_purge(bool input, bool output);
+
 void tty_search(void);
 GList *tty_search_for_serial_devices(void);

@@ -146,6 +146,7 @@ Options:
   -c, --color 0..255|bold|none|list      Colorize tio text (default: bold)
   -S, --socket <socket>                  Redirect I/O to socket
       --socket-rfc2217                   Offer RFC 2217 to socket clients
+      --rfc2217                          Speak RFC 2217 to a socket target
       --rs-485                           Enable RS-485 mode
       --rs-485-config <config>           Set RS-485 configuration
       --alert bell|blink|none            Alert on connect/disconnect (default: none)
@@ -298,13 +299,16 @@ $ tio unix:/tmp/tio.sock
 Connect to a serial-over-network server speaking RFC 2217, setting the remote
 port's baud rate:
 ```
-$ tio --baudrate 9600 inet:hostname:3001
+$ tio --rfc2217 --baudrate 9600 inet:hostname:3001
 ```
 
 Share a device and let clients configure it over RFC 2217. Without
-`--socket-rfc2217` the socket stays a raw byte stream, which is the default:
+`--socket-rfc2217` the socket stays a raw byte stream, which is the default. A
+`unix:` socket is protected by file permissions; an `inet:` one is reachable by
+anyone who can reach the port, and a client that takes the option can assert a
+break on the attached board:
 ```
-$ tio --socket inet:4242 --socket-rfc2217 /dev/ttyUSB0
+$ tio --socket unix:/tmp/tio.sock --socket-rfc2217 /dev/ttyUSB0
 ```
 
 Map NL to CR-NL on input from device and DEL to BS on output to device:
