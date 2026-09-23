@@ -10,6 +10,64 @@
 [![](https://img.shields.io/github/v/release/tio/tio?sort=semver)](https://github.com/tio/tio/releases)
 [![](https://img.shields.io/repology/repositories/tio)](https://repology.org/project/tio/versions)
 
+## About this fork
+
+This is [jetm/tio](https://github.com/jetm/tio), a fork of
+[tio/tio](https://github.com/tio/tio). Upstream has not merged anything since
+January 2026, so I maintain these changes here. Everything upstream tio does
+works the same way; the fork only adds to it. I use it daily on NXP
+FRDM-i.MX93, NVIDIA Jetson Orin Nano and SolidRun R8000 boards served through
+ser2net.
+
+### What the fork adds
+
+ * **Socket client mode.** A `unix:`, `inet:` or `inet6:` target is connected to
+   as a client instead of being opened as a serial device, so tio can attach to
+   a port shared by another tio's `--socket`, or to any serial-over-network
+   server. See the [examples](#311-examples) and the SOCKET TARGETS section of
+   the man page.
+ * **RFC 2217 client (`--rfc2217`).** Baud rate, data bits, parity, stop bits,
+   flow control, break and DTR/RTS reach the remote port, for servers such as
+   ser2net's `telnet(rfc2217)`. Only the settings named on the command line are
+   sent, so attaching to a console leaves its configuration alone.
+ * **RFC 2217 server (`--socket-rfc2217`).** Off by default, so `--socket`
+   stays a raw byte stream. When enabled, one client at a time may configure
+   the port, and break requests are rate limited.
+ * Break, line toggle and pulse, and buffer flush report that they are
+   unavailable on a plain socket instead of failing with an ioctl error.
+ * A `--socket` client that stops reading is dropped instead of stalling the
+   session for every other client.
+ * Lua scripting: `tio.expect` also returns the text read up to the match,
+   script echo is timestamped per line instead of per character, and a read
+   timeout covers the whole read.
+
+### Fixes not in upstream
+
+ * `--output-delay` and `--output-line-delay` sent the first byte of a
+   multi-byte write repeatedly and never sent the rest.
+ * `--map OLTU` together with `ONLCRNL` crashed when Enter was pressed (fix by
+   @aseemchopra25, from upstream [PR #370](https://github.com/tio/tio/pull/370)).
+ * A short write while flushing output retried from the start of the buffer,
+   repeating the head and dropping the tail. The stdin input thread had the
+   same bug (fix by @aseemchopra25, from upstream
+   [PR #371](https://github.com/tio/tio/pull/371)).
+ * Connecting at a non-standard baud rate briefly hung up the line (B0), and
+   reconfiguring the port afterwards dropped the rate.
+ * `--socket`: a stale UNIX socket file was never detected, so tio failed with
+   "Address already in use"; socket options were set incorrectly; and SIGPIPE
+   was not suppressed on accepted connections on platforms without
+   `MSG_NOSIGNAL`, such as macOS.
+ * While the device kept producing data, the `--socket` server never accepted
+   or read clients. Every ready descriptor is now serviced.
+ * A delayed-output write that failed outright was reported as success.
+
+### Installing the fork
+
+On Arch Linux, install [`tio-fork-jetm`](https://aur.archlinux.org/packages/tio-fork-jetm)
+from the AUR (for example `yay -S tio-fork-jetm`). It replaces the `tio`
+package. Anywhere else, clone [jetm/tio](https://github.com/jetm/tio) and follow
+[Installation from source](#45-installation-from-source).
+
 ## 1. Introduction
 
 tio is a serial device tool which features a straightforward command-line and
