@@ -1,0 +1,60 @@
+# Markdown lint configuration for mado (https://github.com/akiomik/mado).
+#
+# Run from the repository root:
+#
+#   mado check .
+#
+# mado skips git-ignored files, so this covers README.md and nothing generated.
+# A project mado.toml replaces any user-level ~/.config/mado/mado.toml rather
+# than merging with it, so the rule list is spelled out here: the result must not
+# depend on whose machine runs the check.
+[lint]
+rules = [
+  "MD001",
+  "MD003",
+  "MD004",
+  "MD009",
+  "MD012",
+  "MD014",
+  "MD018",
+  "MD019",
+  "MD020",
+  "MD021",
+  "MD022",
+  "MD023",
+  "MD024",
+  "MD025",
+  "MD026",
+  "MD027",
+  "MD028",
+  "MD029",
+  "MD031",
+  "MD032",
+  "MD033",
+  "MD034",
+  "MD035",
+  "MD036",
+  "MD037",
+  "MD038",
+  "MD039",
+  "MD040",
+  "MD046",
+  "MD047",
+]
+
+# Left off on purpose:
+#   MD006/MD007 - upstream's README indents every list by one space (" * item").
+#     Re-indenting all of them would touch nearly every list in sections this
+#     fork shares with upstream, for no rendering difference.
+#   MD013 - line length; prose and command lines run long in places.
+#   MD041 - the file opens with the logo image, not a heading.
+
+[lint.md004]
+# The README's lists use asterisks throughout, including upstream's sections.
+style = "asterisk"
+
+[lint.md026]
+punctuation = ".,;:!"
+
+[lint.md029]
+style = "ordered"
