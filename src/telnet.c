@@ -510,6 +510,17 @@ telnet_request_t telnet_set_line(telnet_t *telnet, int fd, telnet_line_t line, b
 
 static void report_setting(const char *name, long applied, long wanted)
 {
+    /* Nothing was asked for, so there is nothing to have failed. A server such
+     * as ser2net tells every attached client the settings in effect whenever
+     * any one client changes them, so an answer can arrive for a setting this
+     * client never sent. Measured against ser2net: a second client attaching to
+     * the port made an idle tio print all four "not applied" warnings for
+     * requests it had not made. */
+    if (wanted == 0)
+    {
+        return;
+    }
+
     if (applied == wanted)
     {
         tio_printf("Remote port %s set to %ld", name, applied);
@@ -544,6 +555,13 @@ static const char *parity_name(long value)
  * is reported by name rather than by the number that crossed the link */
 static void report_parity(long applied, long wanted)
 {
+    /* Same as report_setting(): a wire value of 0 is no request, since the
+     * parity values start at PARITY_VALUE_NONE (1) */
+    if (wanted == 0)
+    {
+        return;
+    }
+
     if (applied == wanted)
     {
         tio_printf("Remote port parity set to %s", parity_name(applied));
